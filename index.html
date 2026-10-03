@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="fi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#111">
+  <title>QLab Remote</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; background: #111; color: #eee;
+      font-family: -apple-system, system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+    body { display: flex; flex-direction: column; padding: 16px;
+      padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(16px, env(safe-area-inset-bottom)); gap: 16px; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #888; }
+    #conn { font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; }
+    #conn::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #b3261e; }
+    #conn.on::before { background: #2fbf5a; }
+    #cues { flex: 1; display: flex; flex-direction: column; gap: 16px; }
+    button { flex: 1; border: 0; border-radius: 20px; background: #1f7a3a; color: #fff;
+      font-size: 22px; font-weight: 700; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 4px; touch-action: manipulation;
+      transition: transform .08s, background .15s; }
+    button .num { font-size: 64px; line-height: 1; }
+    .cue { position: relative; overflow: hidden; }
+    .cue .name { font-size: 15px; font-weight: 500; opacity: .85; max-width: 90%;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cue .info { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; opacity: .9; min-height: 1.2em; }
+    .cue .state { display: inline-block; padding: 2px 8px; border-radius: 6px; margin-right: 6px;
+      font-size: 11px; letter-spacing: .08em; background: rgba(0,0,0,.25); }
+    .cue.running .state { background: #fff; color: #1f7a3a; }
+    .cue.paused .state { background: #f2b705; color: #111; }
+    .cue .bar { position: absolute; left: 0; bottom: 0; height: 6px; width: 0; background: rgba(255,255,255,.85); }
+    .cue.running { box-shadow: inset 0 0 0 3px #fff; }
+    button:active { transform: scale(.97); background: #2a9a4c; }
+    button.ok { background: #2fbf5a; }
+    button.err { background: #b3261e; }
+    #stop { flex: 0 0 96px; background: #5a1a17; font-size: 28px; letter-spacing: .1em; }
+    #stop small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
+    #stop:active { background: #7a2420; }
+    #stop.armed { background: #d9342b; }
+    #status { text-align: center; font-size: 14px; color: #888; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <header><h1>QLab Remote</h1><span id="conn">QLab</span></header>
+  <div id="cues"></div>
+  <button id="stop"><span>STOP</span><small>tuplanapautus</small></button>
+  <div id="status"></div>
+  <script>
+    const statusEl = document.getElementById('status');
+    const cuesEl = document.getElementById('cues');
+
+    async function go(cue, btn) {
+      btn.classList.remove('ok', 'err');
+      try {
+        const res = await fetch('/go/' + encodeURIComponent(cue), { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        btn.classList.add('ok');
+        statusEl.textContent = 'GO cue ' + cue + ' – ' + new Date().toLocaleTimeString('fi-FI');
+        if (navigator.vibrate) navigator.vibrate(30);
+      } catch (e) {
+        btn.classList.add('err');
+        statusEl.textContent = 'Virhe: ' + e.message;
+      }
+      setTimeout(() => btn.classList.remove('ok', 'err'), 400);
+    }
+
+    // Stop requires two taps within DOUBLE_TAP_MS so it can't be hit by accident.
+    const DOUBLE_TAP_MS = 500;
+    const stopBtn = document.getElementById('stop');
+    let armTimer = null;
+
+    stopBtn.addEventListener('click', async () => {
+      if (!armTimer) {
+        stopBtn.classList.add('armed');
+        armTimer = setTimeout(() => { armTimer = null; stopBtn.classList.remove('armed'); }, DOUBLE_TAP_MS);
+        return;
+      }
+      clearTimeout(armTimer);
+      armTimer = null;
+      stopBtn.classList.remove('armed');
+      try {
+        const res = await fetch('/stop', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        statusEl.textContent = 'STOP – ' + new Date().toLocaleTimeString('fi-FI');
+        if (navigator.vibrate) navigator.vibrate([30, 50, 30]);
+      } catch (e) {
+        statusEl.textContent = 'Virhe: ' + e.message;
+      }
+    });
+
+    const connEl = document.getElementById('conn');
+    const cueButtons = {};
+
+    function fmt(sec) {
+      sec = Math.max(0, Math.round(sec));
+      return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+    }
+
+    function render(status) {
+      connEl.classList.toggle('on', status.connected);
+      connEl.textContent = status.connected ? 'QLab yhdistetty' : 'Ei yhteyttä QLabiin';
+      for (const [cue, btn] of Object.entries(cueButtons)) {
+        const s = status.cues[cue];
+        const name = btn.querySelector('.name');
+        const info = btn.querySelector('.info');
+        const bar = btn.querySelector('.bar');
+        btn.classList.toggle('running', !!(s && s.running && !s.paused));
+        btn.classList.toggle('paused', !!(s && s.paused));
+        if (!s) { name.textContent = ''; info.textContent = ''; bar.style.width = 0; continue; }
+        if (!s.found) { name.textContent = 'Cuea ei löydy'; info.textContent = ''; bar.style.width = 0; continue; }
+        name.textContent = s.name || '';
+        const label = s.paused ? 'TAUKO' : s.running ? 'SOI' : 'VALMIS';
+        const active = s.running || s.paused;
+        let time;
+        if (!s.duration) time = active ? fmt(s.elapsed) : '–';
+        else time = (active ? '−' + fmt(s.duration - s.elapsed) : fmt(s.duration)) + ' / ' + fmt(s.duration);
+        info.innerHTML = '<span class="state"></span><span class="time"></span>';
+        info.querySelector('.state').textContent = label;
+        info.querySelector('.time').textContent = time;
+        bar.style.width = active && s.duration ? Math.min(100, s.elapsed / s.duration * 100) + '%' : 0;
+      }
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch('/status', { cache: 'no-store' });
+        render(await res.json());
+      } catch {
+        connEl.classList.remove('on');
+        connEl.textContent = 'Ei yhteyttä palvelimeen';
+      }
+      setTimeout(poll, 300);
+    }
+
+    fetch('/cues').then(r => r.json()).then(cues => {
+      for (const cue of cues) {
+        const btn = document.createElement('button');
+        btn.className = 'cue';
+        btn.innerHTML = '<span>GO</span><span class="num"></span><span class="name"></span><span class="info"></span><span class="bar"></span>';
+        btn.querySelector('.num').textContent = cue;
+        btn.addEventListener('click', () => go(cue, btn));
+        cuesEl.appendChild(btn);
+        cueButtons[cue] = btn;
+      }
+      poll();
+    }).catch(() => { statusEl.textContent = 'Ei yhteyttä palvelimeen'; });
+  </script>
+</body>
+</html>

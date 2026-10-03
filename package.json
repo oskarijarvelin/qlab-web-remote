@@ -1,0 +1,10 @@
+{
+  "name": "qlab-web-remote",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mobile web remote for firing QLab cues over OSC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
