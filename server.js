@@ -1,6 +1,8 @@
 // QLab web remote: serves a mobile page and forwards button presses to QLab as OSC over UDP.
 // Cue playback status is polled from QLab over OSC/TCP (SLIP-framed), since QLab always replies on TCP.
+// Spotify (desktop app on the same Mac) is controlled and polled via AppleScript.
 const http = require('http');
+const { execFile } = require('child_process');
 const dgram = require('dgram');
 const net = require('net');
 const fs = require('fs');
@@ -10,6 +12,7 @@ const os = require('os');
 const PORT = Number(process.env.PORT) || 8080;
 const QLAB_HOST = process.env.QLAB_HOST || '127.0.0.1';
 const QLAB_PORT = Number(process.env.QLAB_PORT) || 53000;
+const FADE_SECONDS = Number(process.env.FADE_SECONDS) || 2;
 const ALLOWED_CUES = (process.env.CUES || '1,2').split(',').map((c) => c.trim());
 
 const udp = dgram.createSocket('udp4');
@@ -21,13 +24,20 @@ function oscString(str) {
   return padded;
 }
 
-function encodeOsc(address, stringArgs = []) {
-  const tags = ',' + 's'.repeat(stringArgs.length);
-  return Buffer.concat([oscString(address), oscString(tags), ...stringArgs.map(oscString)]);
+function oscFloat(n) {
+  const buf = Buffer.alloc(4);
+  buf.writeFloatBE(n);
+  return buf;
 }
 
-function sendOsc(address) {
-  const msg = encodeOsc(address);
+// Args may be strings (OSC 's') or numbers (OSC 'f').
+function encodeOsc(address, args = []) {
+  const tags = ',' + args.map((a) => (typeof a === 'number' ? 'f' : 's')).join('');
+  return Buffer.concat([oscString(address), oscString(tags), ...args.map((a) => (typeof a === 'number' ? oscFloat(a) : oscString(a)))]);
+}
+
+function sendOsc(address, args) {
+  const msg = encodeOsc(address, args);
   return new Promise((resolve, reject) => {
     udp.send(msg, QLAB_PORT, QLAB_HOST, (err) => (err ? reject(err) : resolve()));
   });
@@ -87,7 +97,7 @@ function slipDecoder(onPacket) {
 // --- Status polling ---
 const POLL_MS = 250;
 const STATUS_KEYS = JSON.stringify(['displayName', 'isRunning', 'isPaused', 'duration', 'actionElapsed']);
-const status = { connected: false, cues: {} };
+const status = { connected: false, cues: {}, spotify: { running: false } };
 
 function connectQlab() {
   const sock = net.createConnection({ host: QLAB_HOST, port: QLAB_PORT });
@@ -139,6 +149,53 @@ function connectQlab() {
 
 connectQlab();
 
+// --- Spotify ---
+const SPOTIFY_POLL_MS = 1000;
+const SPOTIFY_COMMANDS = { playpause: 'playpause', next: 'next track', previous: 'previous track' };
+
+function osascript(script) {
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-e', script], { timeout: 3000 }, (err, stdout) => (err ? reject(err) : resolve(stdout.trim())));
+  });
+}
+
+// Position is converted to integer ms in AppleScript so the output doesn't depend on the locale's decimal separator.
+const SPOTIFY_STATUS_SCRIPT = `
+if application "Spotify" is running then
+  tell application "Spotify"
+    set d to "|"
+    return (player state as string) & d & (sound volume) & d & ((player position * 1000) as integer) & d & (duration of current track) & d & (artist of current track) & d & (name of current track)
+  end tell
+end if
+return ""`;
+
+async function refreshSpotify() {
+  try {
+    const out = await osascript(SPOTIFY_STATUS_SCRIPT);
+    if (!out) {
+      status.spotify = { running: false };
+    } else {
+      const [state, volume, positionMs, durationMs, artist, ...name] = out.split('|');
+      status.spotify = {
+        running: true,
+        state,
+        volume: Number(volume),
+        position: Number(positionMs) / 1000,
+        duration: Number(durationMs) / 1000,
+        artist,
+        name: name.join('|'),
+      };
+    }
+  } catch {
+    status.spotify = { running: false };
+  }
+}
+
+(async function pollSpotify() {
+  await refreshSpotify();
+  setTimeout(pollSpotify, SPOTIFY_POLL_MS);
+})();
+
 const indexHtml = fs.readFileSync(path.join(__dirname, 'index.html'));
 
 const server = http.createServer(async (req, res) => {
@@ -157,6 +214,24 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify(status));
   }
 
+  if (req.method === 'POST' && req.url === '/fade') {
+    try {
+      await sendOsc('/panicInTime', [FADE_SECONDS]);
+      console.log(`${new Date().toLocaleTimeString()}  FADE all (${FADE_SECONDS}s)`);
+      res.writeHead(204);
+      return res.end();
+    } catch (err) {
+      console.error(err);
+      res.writeHead(500);
+      return res.end('OSC send failed');
+    }
+  }
+
+  if (req.method === 'GET' && req.url === '/config') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ fadeSeconds: FADE_SECONDS }));
+  }
+
   if (req.method === 'POST' && req.url === '/stop') {
     try {
       await sendOsc('/stop');
@@ -167,6 +242,29 @@ const server = http.createServer(async (req, res) => {
       console.error(err);
       res.writeHead(500);
       return res.end('OSC send failed');
+    }
+  }
+
+  const spotifyMatch = req.method === 'POST' && req.url.match(/^\/spotify\/(\w+)(?:\/(\d+))?$/);
+  if (spotifyMatch) {
+    const [, action, value] = spotifyMatch;
+    let script;
+    if (action === 'volume' && value !== undefined) script = `tell application "Spotify" to set sound volume to ${Math.min(100, Number(value))}`;
+    else if (SPOTIFY_COMMANDS[action]) script = `tell application "Spotify" to ${SPOTIFY_COMMANDS[action]}`;
+    if (!script) {
+      res.writeHead(404);
+      return res.end('Unknown Spotify command');
+    }
+    try {
+      await osascript(script);
+      console.log(`${new Date().toLocaleTimeString()}  Spotify ${action}${value !== undefined ? ' ' + value : ''}`);
+      refreshSpotify();
+      res.writeHead(204);
+      return res.end();
+    } catch (err) {
+      console.error(err.message);
+      res.writeHead(500);
+      return res.end('Spotify command failed');
     }
   }
 

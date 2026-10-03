@@ -36,17 +36,57 @@
     button:active { transform: scale(.97); background: #2a9a4c; }
     button.ok { background: #2fbf5a; }
     button.err { background: #b3261e; }
-    #stop { flex: 0 0 96px; background: #5a1a17; font-size: 28px; letter-spacing: .1em; }
+    .stops { flex: 0 0 96px; display: flex; gap: 16px; }
+    #fade { background: #6b4a12; font-size: 28px; letter-spacing: .1em; }
+    #fade small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
+    #fade:active { background: #8a6018; }
+    #fade.ok { background: #d9a020; }
+    #stop { background: #5a1a17; font-size: 28px; letter-spacing: .1em; }
     #stop small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
     #stop:active { background: #7a2420; }
     #stop.armed { background: #d9342b; }
+    #spotify { background: #1a1a1a; border-radius: 20px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+    #spotify .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    #spotify .label { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #1db954; }
+    #spotify .time { font-size: 12px; color: #888; font-variant-numeric: tabular-nums; }
+    #spotify .track { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #spotify .artist { font-size: 13px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -6px; }
+    #spotify .progress { height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
+    #spotify .progress div { height: 100%; width: 0; background: #1db954; }
+    #spotify .controls { display: flex; gap: 10px; }
+    #spotify .controls button { flex: 1; height: 56px; border-radius: 14px; background: #2a2a2a; font-size: 24px; }
+    #spotify .controls button:active { background: #3a3a3a; }
+    #spotify .controls .pp { background: #1db954; color: #111; }
+    #spotify .controls .pp:active { background: #23d160; }
+    #spotify .vol { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #888; }
+    #spotify input[type=range] { flex: 1; accent-color: #1db954; height: 28px; }
+    #spotify.off .controls, #spotify.off .vol, #spotify.off .progress { opacity: .35; }
+    @media (max-height: 740px) {
+      button .num { font-size: 44px; }
+      .stops { flex-basis: 72px; }
+    }
     #status { text-align: center; font-size: 14px; color: #888; min-height: 1.2em; }
   </style>
 </head>
 <body>
   <header><h1>QLab Remote</h1><span id="conn">QLab</span></header>
   <div id="cues"></div>
-  <button id="stop"><span>STOP</span><small>tuplanapautus</small></button>
+  <div class="stops">
+    <button id="fade"><span>FADE</span><small>2 s</small></button>
+    <button id="stop"><span>STOP</span><small>tuplanapautus</small></button>
+  </div>
+  <section id="spotify" class="off">
+    <div class="top"><span class="label">SPOTIFY</span><span class="time"></span></div>
+    <div class="track">Spotify ei ole käynnissä</div>
+    <div class="artist"></div>
+    <div class="progress"><div></div></div>
+    <div class="controls">
+      <button data-cmd="previous" aria-label="Edellinen">⏮</button>
+      <button data-cmd="playpause" class="pp" aria-label="Toista/tauko">▶</button>
+      <button data-cmd="next" aria-label="Seuraava">⏭</button>
+    </div>
+    <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Äänenvoimakkuus"><span class="volnum"></span></label>
+  </section>
   <div id="status"></div>
   <script>
     const statusEl = document.getElementById('status');
@@ -91,6 +131,22 @@
       }
     });
 
+    const fadeBtn = document.getElementById('fade');
+    fetch('/config').then(r => r.json()).then(c => { fadeBtn.querySelector('small').textContent = c.fadeSeconds + ' s'; }).catch(() => {});
+
+    fadeBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/fade', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        fadeBtn.classList.add('ok');
+        setTimeout(() => fadeBtn.classList.remove('ok'), 400);
+        statusEl.textContent = 'FADE – ' + new Date().toLocaleTimeString('fi-FI');
+        if (navigator.vibrate) navigator.vibrate(30);
+      } catch (e) {
+        statusEl.textContent = 'Virhe: ' + e.message;
+      }
+    });
+
     const connEl = document.getElementById('conn');
     const cueButtons = {};
 
@@ -99,7 +155,61 @@
       return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
     }
 
+    const sp = document.getElementById('spotify');
+    const volInput = sp.querySelector('input[type=range]');
+    let volDragging = false;
+    let volSending = false;
+    let volPending = null;
+
+    async function spotify(cmd) {
+      try {
+        const res = await fetch('/spotify/' + cmd, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+      } catch (e) {
+        statusEl.textContent = 'Virhe: ' + e.message;
+      }
+    }
+
+    sp.querySelectorAll('.controls button').forEach(b => b.addEventListener('click', () => spotify(b.dataset.cmd)));
+
+    // Send volume changes while dragging, but never more than one request in flight.
+    async function sendVolume(v) {
+      if (volSending) { volPending = v; return; }
+      volSending = true;
+      await spotify('volume/' + v);
+      volSending = false;
+      if (volPending !== null) { const next = volPending; volPending = null; sendVolume(next); }
+    }
+    volInput.addEventListener('input', () => {
+      sp.querySelector('.volnum').textContent = volInput.value;
+      sendVolume(volInput.value);
+    });
+    volInput.addEventListener('pointerdown', () => { volDragging = true; });
+    volInput.addEventListener('change', () => { setTimeout(() => { volDragging = false; }, 1500); });
+
+    function renderSpotify(s) {
+      sp.classList.toggle('off', !s || !s.running);
+      if (!s || !s.running) {
+        sp.querySelector('.track').textContent = 'Spotify ei ole käynnissä';
+        sp.querySelector('.artist').textContent = '';
+        sp.querySelector('.time').textContent = '';
+        sp.querySelector('.progress div').style.width = 0;
+        sp.querySelector('.pp').textContent = '▶';
+        return;
+      }
+      sp.querySelector('.track').textContent = s.name || '–';
+      sp.querySelector('.artist').textContent = s.artist || '';
+      sp.querySelector('.time').textContent = s.duration ? '−' + fmt(s.duration - s.position) + ' / ' + fmt(s.duration) : '';
+      sp.querySelector('.progress div').style.width = s.duration ? Math.min(100, s.position / s.duration * 100) + '%' : 0;
+      sp.querySelector('.pp').textContent = s.state === 'playing' ? '⏸' : '▶';
+      if (!volDragging && !volSending) {
+        volInput.value = s.volume;
+        sp.querySelector('.volnum').textContent = s.volume;
+      }
+    }
+
     function render(status) {
+      renderSpotify(status.spotify);
       connEl.classList.toggle('on', status.connected);
       connEl.textContent = status.connected ? 'QLab yhdistetty' : 'Ei yhteyttä QLabiin';
       for (const [cue, btn] of Object.entries(cueButtons)) {
