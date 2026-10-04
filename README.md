@@ -14,6 +14,9 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 - **Spotify**: soiva kappale ja edistyminen, edellinen / toista-tauko / seuraava sekä äänenvoimakkuus.
 - **Yhteyskatko näkyy:** jos puhelin ei saa yhteyttä palvelimeen tai palvelin QLabiin, näytön yläreunaan tulee punainen ilmoitus ja QLab-napit harmaantuvat.
 - **Valinnainen PIN** jaettuihin verkkoihin ja tuki QLabin **passcodelle**.
+- **Napit valitaan puhelimella:** ⚙-napista aukeaa editori, jossa cuet lisätään suoraan QLabin cue-listasta ja niille annetaan teksti, väri ja Spotify-feidi. Muutokset tallentuvat `config.json`:iin ja päivittyvät kaikkiin avoimiin puhelimiin.
+- **Tabletti ja vaakanäkymä:** leveällä näytöllä cuet ovat vasemmalla ruudukossa ja FADE, STOP ja Spotify oikealla.
+- **Koti-valikon kuvake:** sivun voi lisätä puhelimen Koti-valikkoon omana sovelluksenaan.
 
 ## Vaatimukset
 
@@ -35,7 +38,7 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
    - saako Node ottaa vastaan verkkoyhteyksiä → **Salli**
    - saako ohjelma ohjata Spotifyta → **Salli**
 
-Vinkki: iPhonella sivun voi lisätä Koti-valikkoon (Jaa → Lisää Koti-valikkoon), jolloin se aukeaa kuin oma sovellus.
+**Koti-valikkoon:** iPhonella Safari → Jaa → Lisää Koti-valikkoon. Sivu aukeaa omana sovelluksenaan koko näytölle ilman selaimen palkkeja. Jos PIN on käytössä, se kysytään sovelluksessa kerran uudelleen, koska iOS pitää kotivalikon sovelluksen evästeet erillään Safarista. Androidin Chromessa (valikko → Lisää aloitusnäyttöön) kuvake toimii, mutta sivu aukeaa selaimessa, koska koko näytön tila vaatii Chromessa HTTPS-yhteyden.
 
 Pysäytä palvelin terminaalissa **Ctrl+C**:llä tai sulkemalla ikkuna. (Ctrl+Z jättää sen taustalle varaamaan porttia.)
 
@@ -52,6 +55,8 @@ Palvelin estää Macia menemästä lepotilaan niin kauan kuin se on käynnissä 
 - [ ] Jos "musiikki alas" on käytössä: Spotifyn äänenvoimakkuus palautuu feidin jälkeen
 
 ## Asetukset
+
+Napit on helpointa valita puhelimella ⚙-napista (ks. [Ominaisuudet](#ominaisuudet)). Editori kirjoittaa saman `config.json`-tiedoston, jota voi muokata myös käsin. Editori ei ole käytössä, jos cuet annetaan `CUES`-ympäristömuuttujalla.
 
 Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.example.json`](config.example.json)). Tiedosto ei mene versionhallintaan, joten jokaisella koneella ja tapahtumalla voi olla omansa. Eri tapahtumien asetustiedostoja voi pitää erikseen ja valita käynnistyksessä: `CONFIG=keikat/gaala.json npm start`.
 
@@ -89,10 +94,11 @@ Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`
 - Komennot (`/cue/{n}/start`, `/cue/{n}/togglePause`, `/cue/{n}/stop`, `/cue/{n}/panicInTime`, `/go`, `/playhead/next`, `/playhead/previous`, `/panicInTime`, `/stop`) odottavat QLabin vastausta enintään sekunnin ennen kuin puhelimelle vastataan.
 - Cuejen ja playheadin tila kysytään (`/cue/{n}/valuesForKeys`, `/cue/playhead/valuesForKeys`) neljä kertaa sekunnissa ja välitetään sivulle Server-Sent Events -yhteydellä. Jos vastauksia ei tule kahteen sekuntiin, sivu näyttää "QLab ei vastaa".
 - Spotifyta ohjataan ja sen tila luetaan AppleScriptillä (`osascript`) kerran sekunnissa. "Musiikki alas" laskee äänenvoimakkuuden nollaan, pysäyttää toiston ja palauttaa äänenvoimakkuuden ennalleen.
-- Koodi on kolmessa tiedostossa: [`server.js`](server.js) (palvelin), [`index.html`](index.html) (sivu) ja [`qr.js`](qr.js) (QR-koodi terminaaliin).
+- Editorin cue-lista haetaan QLabilta komennolla `/cueLists`. Napeiksi voi valita vain cueja, joilla on numero, koska komennot osoitetaan numerolla.
+- Koodi on neljässä tiedostossa: [`server.js`](server.js) (palvelin), [`index.html`](index.html) (sivu), [`qr.js`](qr.js) (QR-koodi terminaaliin) ja [`icon.js`](icon.js) (Koti-valikon kuvake PNG:nä).
 
 ## Tietoturva
 
-Ilman `pin`-asetusta kuka tahansa samassa verkossa oleva voi avata sivun ja laukaista cueja tai ohjata Spotifyta. Aseta PIN, jos verkko on jaettu.
+Ilman `pin`-asetusta kuka tahansa samassa verkossa oleva voi avata sivun, laukaista cueja, ohjata Spotifyta ja muuttaa nappeja. Aseta PIN, jos verkko on jaettu.
 
 PIN suojaa vahingoilta ja uteliailta, mutta yhteys on salaamaton (`http://`), joten se ei suojaa verkkoliikennettä kuuntelevalta. Käytä työkalua vain lähiverkossa, äläkä avaa porttia internetiin.

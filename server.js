@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { qrTerminal } = require('./qr');
+const { iconPng } = require('./icon');
 
 // --- Config: defaults <- config.json <- environment variables ---
 const COLORS = {
@@ -17,9 +18,24 @@ const COLORS = {
   red: '#8a1f1f', teal: '#1a6b6b', gray: '#444444',
 };
 
+// CONFIG lets you keep one file per event, e.g. CONFIG=events/gala.json npm start
+const CONFIG_FILE = process.env.CONFIG ? path.resolve(process.env.CONFIG) : path.join(__dirname, 'config.json');
+
+const MAX_CUES = 24;
+
+// Validates one cue entry from config.json or the editor. Returns { cue } or { error }.
+function normalizeCue(cue) {
+  const number = String(cue?.number ?? '').trim();
+  if (!number || /[\s/#*?,[\]{}]/.test(number)) {
+    return { error: `Virheellinen cuenumero "${cue?.number ?? ""}" (ei välilyöntejä eikä merkkejä / # * ? , [ ] { })` };
+  }
+  const color = COLORS[cue.color] || (/^#[0-9a-f]{6}$/i.test(cue.color || '') ? cue.color.toLowerCase() : COLORS.green);
+  const label = cue.label ? String(cue.label).slice(0, 40) : '';
+  return { cue: { number, label, color, spotifyFadeOut: !!cue.spotifyFadeOut } };
+}
+
 function loadConfig() {
-  // CONFIG lets you keep one file per event, e.g. CONFIG=events/gala.json npm start
-  const file = process.env.CONFIG ? path.resolve(process.env.CONFIG) : path.join(__dirname, 'config.json');
+  const file = CONFIG_FILE;
   let fileConfig = {};
   if (process.env.CONFIG && !fs.existsSync(file)) {
     console.error(`Config file not found: ${file}`);
@@ -58,14 +74,13 @@ function loadConfig() {
   if (env.FADE_CONFIRM) c.fadeConfirm = env.FADE_CONFIRM === '1';
   if (env.CUES) c.cues = env.CUES.split(',').map((n) => ({ number: n.trim() }));
 
-  c.cues = c.cues.map((cue) => {
-    const number = String(cue.number ?? '').trim();
-    if (!number || /[\s/#*?,[\]{}]/.test(number)) {
-      console.error(`Invalid cue number in config: "${cue.number}" (no spaces or OSC special characters)`);
+  c.cues = c.cues.map((entry) => {
+    const { cue, error } = normalizeCue(entry);
+    if (error) {
+      console.error(`config: ${error}`);
       process.exit(1);
     }
-    const color = COLORS[cue.color] || (/^#[0-9a-f]{6}$/i.test(cue.color || '') ? cue.color : COLORS.green);
-    return { number, label: cue.label ? String(cue.label) : '', color, spotifyFadeOut: !!cue.spotifyFadeOut };
+    return cue;
   });
   if (!c.cues.length && !c.playhead) {
     console.error('Nothing to control: add cues to config.json or set "playhead": true');
@@ -75,7 +90,42 @@ function loadConfig() {
 }
 
 const config = loadConfig();
-const cueConfig = new Map(config.cues.map((cue) => [cue.number, cue]));
+let cueConfig = new Map(config.cues.map((cue) => [cue.number, cue]));
+
+// Saves the cue list from the editor into the config file, keeping the file's other settings.
+// Colors that match the palette are written by name so the file stays readable.
+function saveCues(cues) {
+  let fileConfig = {};
+  if (fs.existsSync(CONFIG_FILE)) fileConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+  const colorNames = Object.fromEntries(Object.entries(COLORS).map(([name, hex]) => [hex, name]));
+  fileConfig.cues = cues.map((cue) => {
+    const out = { number: cue.number };
+    if (cue.label) out.label = cue.label;
+    out.color = colorNames[cue.color] || cue.color;
+    if (cue.spotifyFadeOut) out.spotifyFadeOut = true;
+    return out;
+  });
+  const tmp = CONFIG_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(fileConfig, null, 2) + '\n');
+  fs.renameSync(tmp, CONFIG_FILE);
+
+  config.cues = cues;
+  cueConfig = new Map(cues.map((cue) => [cue.number, cue]));
+  status.cues = {};
+}
+
+// Flattens QLab's nested cue lists (groups contain cues) into rows for the cue picker.
+function flattenCueLists(lists) {
+  const rows = [];
+  const walk = (cues, depth, list) => {
+    for (const cue of cues || []) {
+      rows.push({ list, depth, number: cue.number || '', name: cue.listName || cue.name || '', type: cue.type });
+      walk(cue.cues, depth + 1, list);
+    }
+  };
+  for (const list of lists || []) walk(list.cues, 0, list.listName || list.name || '');
+  return rows;
+}
 
 // --- OSC encoding ---
 function oscString(str) {
@@ -399,10 +449,11 @@ function readBody(req, limit = 1024) {
 
 // --- Server-Sent Events ---
 const sseClients = new Set();
-setInterval(() => {
-  if (!sseClients.size) return;
-  const payload = `data: ${JSON.stringify(status)}\n\n`;
+function broadcast(payload) {
   for (const res of sseClients) res.write(payload);
+}
+setInterval(() => {
+  if (sseClients.size) broadcast(`data: ${JSON.stringify(status)}\n\n`);
 }, POLL_MS);
 
 // --- HTTP ---
@@ -440,6 +491,27 @@ const server = http.createServer(async (req, res) => {
     return res.end(indexHtml);
   }
 
+  // Home screen icon and manifest are public: the phone fetches them before any PIN is entered.
+  const iconMatch = method === 'GET' && url.match(/^\/icon-(180|192|512)\.png$/);
+  if (iconMatch) {
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=86400' });
+    return res.end(iconPng(Number(iconMatch[1])));
+  }
+
+  if (method === 'GET' && url === '/manifest.webmanifest') {
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json' });
+    return res.end(JSON.stringify({
+      name: 'QLab Remote',
+      short_name: 'QLab',
+      start_url: '/',
+      display: 'standalone',
+      orientation: 'any',
+      background_color: '#111111',
+      theme_color: '#111111',
+      icons: [192, 512].map((size) => ({ src: `/icon-${size}.png`, sizes: `${size}x${size}`, type: 'image/png' })),
+    }));
+  }
+
   if (method === 'POST' && url === '/login') {
     let pin = '';
     try { pin = (await readBody(req)).trim(); } catch { return sendText(res, 413, 'Too large'); }
@@ -462,7 +534,48 @@ const server = http.createServer(async (req, res) => {
       playhead: config.playhead,
       spotify: config.spotify,
       cues: config.cues,
+      colors: COLORS,
+      // The cue editor would be overridden on the next start if cues come from the environment.
+      cuesEditable: !process.env.CUES,
     });
+  }
+
+  if (method === 'GET' && url === '/qlab/cues') {
+    try {
+      const reply = await qlabRequest('/cueLists');
+      return sendJson(res, flattenCueLists(reply.data));
+    } catch (err) {
+      return sendText(res, err.httpStatus || 500, err.message);
+    }
+  }
+
+  if (method === 'PUT' && url === '/config/cues') {
+    if (process.env.CUES) return sendText(res, 409, 'CUES-ympäristömuuttuja ohittaa asetukset');
+    let entries;
+    try {
+      entries = JSON.parse(await readBody(req, 64 * 1024));
+    } catch {
+      return sendText(res, 400, 'Virheellinen pyyntö');
+    }
+    if (!Array.isArray(entries) || entries.length > MAX_CUES) return sendText(res, 400, `Enintään ${MAX_CUES} cueta`);
+    if (!entries.length && !config.playhead) return sendText(res, 400, 'Valitse vähintään yksi cue');
+    const cues = [];
+    for (const entry of entries) {
+      const { cue, error } = normalizeCue(entry);
+      if (error) return sendText(res, 400, error);
+      if (cues.some((c) => c.number === cue.number)) return sendText(res, 400, `Cue ${cue.number} on listassa kahdesti`);
+      cues.push(cue);
+    }
+    try {
+      saveCues(cues);
+    } catch (err) {
+      console.error(err);
+      return sendText(res, 500, 'Tallennus epäonnistui: ' + err.message);
+    }
+    log(`Cues saved to ${path.basename(CONFIG_FILE)}: ${cues.map((c) => c.number).join(', ') || '(none)'}`);
+    broadcast('event: config\ndata: {}\n\n');
+    res.writeHead(204);
+    return res.end();
   }
 
   if (method === 'GET' && url === '/status') return sendJson(res, status);

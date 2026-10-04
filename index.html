@@ -4,7 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="QLab">
   <meta name="theme-color" content="#111">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-180.png">
+  <link rel="icon" type="image/png" href="/icon-192.png">
   <title>QLab Remote</title>
   <style>
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -116,11 +122,78 @@
       .stops { flex-basis: 72px; }
     }
     #status { text-align: center; font-size: 14px; color: #888; min-height: 1.2em; }
+
+    header .right { display: flex; align-items: center; gap: 12px; }
+    #edit-open { flex: none; width: 36px; height: 36px; border-radius: 10px; background: #222; font-size: 18px; color: #aaa; }
+    #main, #side { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+    #main { flex: 1; }
+    /* Many cues: keep buttons tappable and let the list scroll instead of squashing them. */
+    .cue { flex: 1 0 110px; }
+    #cues { overflow-y: auto; }
+
+    /* Tablet / landscape: cues on the left, stop buttons and Spotify on the right. */
+    @media (min-width: 700px) and (orientation: landscape), (min-width: 1000px) {
+      body { display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 36%, 380px);
+        grid-template-rows: auto auto minmax(0, 1fr) auto; column-gap: 16px; height: 100%; }
+      header, #banner, #status { grid-column: 1 / -1; }
+      header { grid-row: 1; }
+      #banner { grid-row: 2; }
+      #status { grid-row: 4; }
+      #main { grid-column: 1; grid-row: 3; }
+      #side { grid-column: 2; grid-row: 3; overflow-y: auto; }
+      #cues { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); grid-auto-rows: minmax(110px, 1fr); }
+      .stops { flex-basis: 110px; }
+    }
+    @media (max-height: 500px) and (orientation: landscape) {
+      body { padding-top: max(8px, env(safe-area-inset-top)); padding-bottom: max(8px, env(safe-area-inset-bottom)); row-gap: 8px; }
+      .cue .num { font-size: 34px; }
+      .cue.labelled .num { font-size: 26px; }
+      .cue .go { font-size: 14px; }
+      #cues { grid-auto-rows: minmax(90px, 1fr); }
+      .stops { flex-basis: 72px; }
+      #spotify .controls button { height: 44px; }
+    }
+
+    #editor .panel { width: 100%; height: 100%; background: #151515; display: flex; flex-direction: column;
+      padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    .ed-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #262626; }
+    .ed-head h2 { flex: 1; margin: 0; text-align: center; font-size: 17px; }
+    .ed-head button { flex: none; height: 40px; padding: 0 14px; border-radius: 10px; font-size: 15px; background: #2a2a2a; }
+    .ed-head .ed-save { background: #1f7a3a; }
+    .ed-body { flex: 1; overflow-y: auto; padding: 12px 16px 24px; user-select: text; -webkit-user-select: text; }
+    .ed-body h3 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #888; margin: 24px 0 8px; }
+    .ed-body ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .ed-err { color: #ff6b61; margin: 0; min-height: 0; }
+    .ed-err:empty { display: none; }
+    .ed-empty { color: #888; text-align: center; }
+    .ed-list li { background: #1f1f1f; border-radius: 12px; padding: 10px; display: grid; gap: 8px;
+      grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; border-left: 6px solid var(--bg); }
+    .ed-list .ed-num { font-weight: 800; font-size: 18px; min-width: 2ch; }
+    .ed-list .ed-qname { font-size: 13px; color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ed-list .ed-row2 { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .ed-list input[type=text] { flex: 1 1 140px; min-width: 0; font-size: 16px; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid #333; background: #111; color: #fff; }
+    .ed-list select { font-size: 15px; padding: 8px; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; }
+    .ed-list label { font-size: 13px; color: #bbb; display: flex; align-items: center; gap: 6px; }
+    .ed-list .ed-moves { display: flex; gap: 4px; }
+    .ed-list .ed-moves button { flex: none; width: 36px; height: 36px; border-radius: 8px; background: #2a2a2a; font-size: 15px; }
+    .ed-list .ed-moves .ed-remove { background: #5a1a17; }
+    .ed-qlab li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #1b1b1b; }
+    .ed-qlab li.ed-note { background: none; color: #888; justify-content: center; }
+    .ed-qlab li.ed-list-name { background: none; color: #888; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; padding: 8px 0 0; }
+    .ed-qlab .ed-num { font-weight: 700; min-width: 3ch; }
+    .ed-qlab .ed-qname { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ed-qlab .ed-type { font-size: 11px; color: #888; }
+    .ed-qlab button { flex: none; width: 40px; height: 36px; border-radius: 8px; font-size: 20px; }
+    .ed-qlab li.added button, .ed-qlab li.nonum button { background: #2a2a2a; color: #777; }
+    .ed-search { width: 100%; font-size: 16px; padding: 10px 12px; border-radius: 10px; border: 1px solid #333;
+      background: #111; color: #fff; margin-bottom: 8px; }
   </style>
 </head>
 <body>
-  <header><h1>QLab Remote</h1><span id="conn">QLab</span></header>
+  <header><h1>QLab Remote</h1><span class="right"><span id="conn">QLab</span><button id="edit-open" aria-label="Muokkaa nappeja" hidden>⚙</button></span></header>
   <div id="banner" role="alert" hidden><strong></strong><span></span></div>
+  <main id="main">
   <section id="playhead" class="empty" hidden>
     <div class="ph-info"><span class="ph-label">SEURAAVANA</span><span class="ph-num"></span><span class="ph-name">Ei cuea valmiina</span></div>
     <div class="ph-controls">
@@ -130,6 +203,8 @@
     </div>
   </section>
   <div id="cues"></div>
+  </main>
+  <aside id="side">
   <div class="stops">
     <button id="fade"><span>FADE</span><small>2 s</small></button>
     <button id="stop"><span>STOP</span><small>tuplanapautus</small></button>
@@ -146,7 +221,26 @@
     </div>
     <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Äänenvoimakkuus"><span class="volnum"></span></label>
   </section>
+  </aside>
   <div id="status"></div>
+
+  <div id="editor" class="overlay" hidden>
+    <div class="panel">
+      <div class="ed-head">
+        <button class="ed-cancel">Peruuta</button>
+        <h2>Napit</h2>
+        <button class="ed-save">Tallenna</button>
+      </div>
+      <div class="ed-body">
+        <p class="ed-err" role="alert"></p>
+        <ul class="ed-list"></ul>
+        <p class="ed-empty">Ei nappeja. Lisää cueja alta.</p>
+        <h3>Lisää QLabista</h3>
+        <input class="ed-search" type="search" placeholder="Hae numerolla tai nimellä" aria-label="Hae cueja">
+        <ul class="ed-qlab"><li class="ed-note">Haetaan cue-listaa…</li></ul>
+      </div>
+    </div>
+  </div>
 
   <div id="sheet" class="overlay" hidden>
     <div class="panel">
@@ -396,6 +490,12 @@
     function listen() {
       const events = new EventSource('/events');
       events.onmessage = e => { resetWatchdog(); render(JSON.parse(e.data)); };
+      // Buttons were changed (possibly from another phone): rebuild by reloading, but don't
+      // throw away an edit in progress here.
+      events.addEventListener('config', () => {
+        if (editorEl.hidden) location.reload();
+        else reloadAfterEdit = true;
+      });
       // EventSource reconnects by itself; a 401 (e.g. PIN changed) closes it for good.
       events.onerror = async () => {
         if (events.readyState === EventSource.CLOSED) {
@@ -437,6 +537,7 @@
       }));
 
       sp.hidden = !config.spotify;
+      $('#edit-open').hidden = !config.cuesEditable;
 
       const fade = () => qlabCommand('/fade', fadeBtn, 'FADE', 30);
       $('small', fadeBtn).textContent = config.fadeSeconds + ' s' + (config.fadeConfirm ? ' · tuplanapautus' : '');
@@ -444,6 +545,142 @@
       else fadeBtn.addEventListener('click', fade);
       doubleTap(stopBtn, () => qlabCommand('/stop', stopBtn, 'STOP', [30, 50, 30]));
     }
+
+    // --- Cue editor ---
+    const editorEl = $('#editor');
+    const COLOR_LABELS = { green: 'Vihreä', blue: 'Sininen', purple: 'Violetti', orange: 'Oranssi', red: 'Punainen', teal: 'Turkoosi', gray: 'Harmaa' };
+    let draft = [];
+    let qlabRows = null;
+    let reloadAfterEdit = false;
+
+    // Builds an element; children may be nodes or strings (always inserted as text, never HTML,
+    // since cue names come from the QLab workspace).
+    function el(tag, props = {}, ...children) {
+      const node = Object.assign(document.createElement(tag), props);
+      for (const child of children) if (child != null) node.append(child);
+      return node;
+    }
+
+    function qlabName(number) {
+      return qlabRows?.find(r => r.number === number)?.name || lastStatus?.cues?.[number]?.name || '';
+    }
+
+    function openEditor() {
+      draft = config.cues.map(c => ({ ...c }));
+      $('.ed-err', editorEl).textContent = '';
+      $('.ed-search', editorEl).value = '';
+      editorEl.hidden = false;
+      renderDraft();
+      loadQlabCues();
+    }
+
+    function closeEditor() {
+      editorEl.hidden = true;
+      if (reloadAfterEdit) location.reload();
+    }
+
+    function renderDraft() {
+      const list = $('.ed-list', editorEl);
+      list.replaceChildren();
+      $('.ed-empty', editorEl).hidden = draft.length > 0;
+      draft.forEach((cue, i) => {
+        const move = (delta) => {
+          const j = i + delta;
+          if (j < 0 || j >= draft.length) return;
+          [draft[i], draft[j]] = [draft[j], draft[i]];
+          renderDraft();
+        };
+        const colorSelect = el('select', { ariaLabel: 'Väri' });
+        for (const [name, hex] of Object.entries(config.colors)) colorSelect.append(el('option', { value: hex, textContent: COLOR_LABELS[name] || name }));
+        if (!Object.values(config.colors).includes(cue.color)) colorSelect.append(el('option', { value: cue.color, textContent: 'Oma ' + cue.color }));
+        colorSelect.value = cue.color;
+
+        const li = el('li', {},
+          el('span', { className: 'ed-num', textContent: cue.number }),
+          el('span', { className: 'ed-qname', textContent: qlabName(cue.number) }),
+          el('span', { className: 'ed-moves' },
+            el('button', { textContent: '↑', ariaLabel: 'Siirrä ylös', disabled: i === 0, onclick: () => move(-1) }),
+            el('button', { textContent: '↓', ariaLabel: 'Siirrä alas', disabled: i === draft.length - 1, onclick: () => move(1) }),
+            el('button', { className: 'ed-remove', textContent: '✕', ariaLabel: 'Poista', onclick: () => { draft.splice(i, 1); renderDraft(); renderQlabRows(); } })),
+          el('div', { className: 'ed-row2' },
+            el('input', { type: 'text', value: cue.label, placeholder: 'Napin teksti (valinnainen)', maxLength: 40, oninput: e => { cue.label = e.target.value; } }),
+            colorSelect,
+            config.spotify ? el('label', {}, el('input', { type: 'checkbox', checked: cue.spotifyFadeOut, onchange: e => { cue.spotifyFadeOut = e.target.checked; } }), '♪ musiikki alas') : null));
+        li.style.setProperty('--bg', cue.color);
+        colorSelect.onchange = () => { cue.color = colorSelect.value; li.style.setProperty('--bg', cue.color); };
+        list.append(li);
+      });
+    }
+
+    async function loadQlabCues() {
+      const list = $('.ed-qlab', editorEl);
+      list.replaceChildren(el('li', { className: 'ed-note', textContent: 'Haetaan cue-listaa…' }));
+      try {
+        const res = await fetch('/qlab/cues');
+        if (!res.ok) throw new Error(await res.text());
+        qlabRows = await res.json();
+      } catch (e) {
+        qlabRows = null;
+        list.replaceChildren(el('li', { className: 'ed-note', textContent: 'Cue-listaa ei saatu: ' + e.message }));
+        return;
+      }
+      renderDraft(); // QLab names are now known
+      renderQlabRows();
+    }
+
+    function renderQlabRows() {
+      if (!qlabRows) return;
+      const list = $('.ed-qlab', editorEl);
+      const q = $('.ed-search', editorEl).value.trim().toLowerCase();
+      const rows = qlabRows.filter(r => !q || r.number.toLowerCase().includes(q) || r.name.toLowerCase().includes(q));
+      const showLists = new Set(qlabRows.map(r => r.list)).size > 1;
+      list.replaceChildren();
+      let currentList = null;
+      for (const r of rows) {
+        if (showLists && r.list !== currentList) {
+          currentList = r.list;
+          list.append(el('li', { className: 'ed-list-name', textContent: r.list }));
+        }
+        const added = draft.some(c => c.number === r.number);
+        const li = el('li', { className: !r.number ? 'nonum' : added ? 'added' : '' },
+          el('span', { className: 'ed-num', textContent: r.number || '–' }),
+          el('span', { className: 'ed-qname', textContent: r.name || '(nimetön)' }),
+          el('span', { className: 'ed-type', textContent: r.type }));
+        li.style.paddingLeft = (12 + r.depth * 16) + 'px';
+        const btn = el('button', { textContent: !r.number ? '–' : added ? '✓' : '+' });
+        if (!r.number) {
+          btn.disabled = true;
+          btn.title = 'Cuella ei ole numeroa. Anna sille numero QLabissa.';
+        } else {
+          btn.ariaLabel = added ? 'Poista napeista' : 'Lisää napiksi';
+          btn.onclick = () => {
+            if (added) draft = draft.filter(c => c.number !== r.number);
+            else draft.push({ number: r.number, label: '', color: config.colors.green, spotifyFadeOut: false });
+            renderDraft();
+            renderQlabRows();
+          };
+        }
+        li.append(btn);
+        list.append(li);
+      }
+      if (!rows.length) list.append(el('li', { className: 'ed-note', textContent: q ? 'Ei osumia' : 'Workspacessa ei ole cueja' }));
+    }
+
+    $('.ed-search', editorEl).addEventListener('input', renderQlabRows);
+    $('.ed-cancel', editorEl).addEventListener('click', closeEditor);
+    $('#edit-open').addEventListener('click', openEditor);
+    $('.ed-save', editorEl).addEventListener('click', async () => {
+      const err = $('.ed-err', editorEl);
+      err.textContent = '';
+      try {
+        const res = await fetch('/config/cues', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft) });
+        if (res.status === 401) return showLogin();
+        if (!res.ok) throw new Error(await res.text());
+        location.reload();
+      } catch (e) {
+        err.textContent = 'Tallennus epäonnistui: ' + (e.message === 'Failed to fetch' ? 'ei yhteyttä palvelimeen' : e.message);
+      }
+    });
 
     function showLogin() {
       const login = $('#login');
