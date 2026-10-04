@@ -5,6 +5,6 @@
   "description": "Mobile web remote for firing QLab cues over OSC",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "caffeinate -i node server.js"
   }
 }

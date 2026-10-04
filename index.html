@@ -44,7 +44,17 @@
     #stop { background: #5a1a17; font-size: 28px; letter-spacing: .1em; }
     #stop small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
     #stop:active { background: #7a2420; }
-    #stop.armed { background: #d9342b; }
+    #stop.armed, #fade.armed { background: #d9342b; }
+    button.pending { animation: pending .6s ease-in-out infinite alternate; }
+    @keyframes pending { to { opacity: .55; } }
+    #banner { background: #b3261e; color: #fff; border-radius: 14px; padding: 12px 16px; text-align: center;
+      display: flex; flex-direction: column; gap: 2px; }
+    #banner[hidden] { display: none; }
+    #banner strong { font-size: 18px; letter-spacing: .06em; }
+    #banner span { font-size: 13px; opacity: .9; }
+    body:not([data-connection="ok"]) .cue:not(.err),
+    body:not([data-connection="ok"]) .stops button:not(.err) { filter: grayscale(1); opacity: .4; }
+    body[data-connection="server"] #spotify { opacity: .4; }
     #spotify { background: #1a1a1a; border-radius: 20px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
     #spotify .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
     #spotify .label { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #1db954; }
@@ -70,6 +80,7 @@
 </head>
 <body>
   <header><h1>QLab Remote</h1><span id="conn">QLab</span></header>
+  <div id="banner" role="alert" hidden><strong></strong><span></span></div>
   <div id="cues"></div>
   <div class="stops">
     <button id="fade"><span>FADE</span><small>2 s</small></button>
@@ -91,69 +102,65 @@
   <script>
     const statusEl = document.getElementById('status');
     const cuesEl = document.getElementById('cues');
-
-    async function go(cue, btn) {
-      btn.classList.remove('ok', 'err');
-      try {
-        const res = await fetch('/go/' + encodeURIComponent(cue), { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text());
-        btn.classList.add('ok');
-        statusEl.textContent = 'GO cue ' + cue + ' – ' + new Date().toLocaleTimeString('fi-FI');
-        if (navigator.vibrate) navigator.vibrate(30);
-      } catch (e) {
-        btn.classList.add('err');
-        statusEl.textContent = 'Virhe: ' + e.message;
-      }
-      setTimeout(() => btn.classList.remove('ok', 'err'), 400);
-    }
-
-    // Stop requires two taps within DOUBLE_TAP_MS so it can't be hit by accident.
-    const DOUBLE_TAP_MS = 500;
-    const stopBtn = document.getElementById('stop');
-    let armTimer = null;
-
-    stopBtn.addEventListener('click', async () => {
-      if (!armTimer) {
-        stopBtn.classList.add('armed');
-        armTimer = setTimeout(() => { armTimer = null; stopBtn.classList.remove('armed'); }, DOUBLE_TAP_MS);
-        return;
-      }
-      clearTimeout(armTimer);
-      armTimer = null;
-      stopBtn.classList.remove('armed');
-      try {
-        const res = await fetch('/stop', { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text());
-        statusEl.textContent = 'STOP – ' + new Date().toLocaleTimeString('fi-FI');
-        if (navigator.vibrate) navigator.vibrate([30, 50, 30]);
-      } catch (e) {
-        statusEl.textContent = 'Virhe: ' + e.message;
-      }
-    });
-
-    const fadeBtn = document.getElementById('fade');
-    fetch('/config').then(r => r.json()).then(c => { fadeBtn.querySelector('small').textContent = c.fadeSeconds + ' s'; }).catch(() => {});
-
-    fadeBtn.addEventListener('click', async () => {
-      try {
-        const res = await fetch('/fade', { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text());
-        fadeBtn.classList.add('ok');
-        setTimeout(() => fadeBtn.classList.remove('ok'), 400);
-        statusEl.textContent = 'FADE – ' + new Date().toLocaleTimeString('fi-FI');
-        if (navigator.vibrate) navigator.vibrate(30);
-      } catch (e) {
-        statusEl.textContent = 'Virhe: ' + e.message;
-      }
-    });
-
+    const bannerEl = document.getElementById('banner');
     const connEl = document.getElementById('conn');
+    const fadeBtn = document.getElementById('fade');
+    const stopBtn = document.getElementById('stop');
     const cueButtons = {};
+
+    const now = () => new Date().toLocaleTimeString('fi-FI');
 
     function fmt(sec) {
       sec = Math.max(0, Math.round(sec));
       return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
     }
+
+    // Sends a QLab command. The server only answers once QLab has confirmed it, so the button
+    // stays in a "pending" state until then and turns green (ok) or red (error).
+    async function qlabCommand(url, btn, label, vibration) {
+      if (btn.classList.contains('pending')) return;
+      btn.classList.remove('ok', 'err');
+      btn.classList.add('pending');
+      try {
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || res.statusText);
+        btn.classList.add('ok');
+        statusEl.textContent = label + ' – ' + now();
+        if (navigator.vibrate) navigator.vibrate(vibration);
+      } catch (e) {
+        btn.classList.add('err');
+        statusEl.textContent = label + ' epäonnistui: ' + (e.message === 'Failed to fetch' ? 'ei yhteyttä palvelimeen' : e.message);
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      }
+      btn.classList.remove('pending');
+      setTimeout(() => btn.classList.remove('ok', 'err'), btn.classList.contains('err') ? 1500 : 400);
+    }
+
+    // Runs action only on the second tap within DOUBLE_TAP_MS, so the button can't be hit by accident.
+    const DOUBLE_TAP_MS = 500;
+    function doubleTap(btn, action) {
+      let armTimer = null;
+      btn.addEventListener('click', () => {
+        if (!armTimer) {
+          btn.classList.add('armed');
+          armTimer = setTimeout(() => { armTimer = null; btn.classList.remove('armed'); }, DOUBLE_TAP_MS);
+          return;
+        }
+        clearTimeout(armTimer);
+        armTimer = null;
+        btn.classList.remove('armed');
+        action();
+      });
+    }
+
+    doubleTap(stopBtn, () => qlabCommand('/stop', stopBtn, 'STOP', [30, 50, 30]));
+
+    fetch('/config').then(r => r.json()).then(c => {
+      const fade = () => qlabCommand('/fade', fadeBtn, 'FADE', 30);
+      fadeBtn.querySelector('small').textContent = c.fadeSeconds + ' s' + (c.fadeConfirm ? ' · tuplanapautus' : '');
+      if (c.fadeConfirm) doubleTap(fadeBtn, fade);
+      else fadeBtn.addEventListener('click', fade);
+    }).catch(() => {});
 
     const sp = document.getElementById('spotify');
     const volInput = sp.querySelector('input[type=range]');
@@ -208,10 +215,28 @@
       }
     }
 
+    // connection: 'server' (page can't reach the server) or the server's QLab state: 'offline', 'noreply', 'ok'.
+    const CONNECTION_TEXT = {
+      server: ['EI YHTEYTTÄ PALVELIMEEN', 'Tarkista wifi ja että palvelin on käynnissä Macilla.'],
+      offline: ['EI YHTEYTTÄ QLABIIN', 'Onko QLab käynnissä?'],
+      noreply: ['QLAB EI VASTAA', 'Onko workspace auki ja OSC sallittu?'],
+    };
+
+    function renderConnection(connection) {
+      document.body.dataset.connection = connection;
+      const text = CONNECTION_TEXT[connection];
+      bannerEl.hidden = !text;
+      if (text) {
+        bannerEl.querySelector('strong').textContent = text[0];
+        bannerEl.querySelector('span').textContent = text[1];
+      }
+      connEl.classList.toggle('on', connection === 'ok');
+      connEl.textContent = connection === 'ok' ? 'QLab yhdistetty' : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
+    }
+
     function render(status) {
+      renderConnection(status.qlab);
       renderSpotify(status.spotify);
-      connEl.classList.toggle('on', status.connected);
-      connEl.textContent = status.connected ? 'QLab yhdistetty' : 'Ei yhteyttä QLabiin';
       for (const [cue, btn] of Object.entries(cueButtons)) {
         const s = status.cues[cue];
         const name = btn.querySelector('.name');
@@ -234,14 +259,20 @@
       }
     }
 
+    // A status request that takes longer than this counts as a lost connection, so stale
+    // cue info never stays on screen looking current.
+    const STATUS_TIMEOUT_MS = 2000;
+
     async function poll() {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), STATUS_TIMEOUT_MS);
       try {
-        const res = await fetch('/status', { cache: 'no-store' });
+        const res = await fetch('/status', { cache: 'no-store', signal: ctrl.signal });
         render(await res.json());
       } catch {
-        connEl.classList.remove('on');
-        connEl.textContent = 'Ei yhteyttä palvelimeen';
+        render({ qlab: 'server', cues: {}, spotify: null });
       }
+      clearTimeout(timer);
       setTimeout(poll, 300);
     }
 
@@ -251,12 +282,12 @@
         btn.className = 'cue';
         btn.innerHTML = '<span>GO</span><span class="num"></span><span class="name"></span><span class="info"></span><span class="bar"></span>';
         btn.querySelector('.num').textContent = cue;
-        btn.addEventListener('click', () => go(cue, btn));
+        btn.addEventListener('click', () => qlabCommand('/go/' + encodeURIComponent(cue), btn, 'GO cue ' + cue, 30));
         cuesEl.appendChild(btn);
         cueButtons[cue] = btn;
       }
       poll();
-    }).catch(() => { statusEl.textContent = 'Ei yhteyttä palvelimeen'; });
+    }).catch(() => renderConnection('server'));
   </script>
 </body>
 </html>
