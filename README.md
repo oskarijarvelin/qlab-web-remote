@@ -4,7 +4,7 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 
 ## Ominaisuudet
 
-- **GO-napit** valituille cueille (oletuksena 1 ja 2), omilla nimillä ja väreillä. Napeissa näkyy cuen nimi, tila (soi / tauko / valmis), jäljellä oleva aika, kokonaiskesto ja edistymispalkki.
+- **GO-napit** valituille cueille (oletuksena 1 ja 2), omilla nimillä ja väreillä. Koko kortti on GO-nappi. Kortissa näkyy cuen numero, nimi (oma teksti tai QLabin nimi ilman tiedostopäätettä) ja kesto. Soidessa kortilla on valkoinen reunus, jäljellä oleva aika ja edistymispalkki. Tauolla reunus ja aika ovat keltaisia.
 - **Pitkä painallus** cue-nappiin avaa valikon: tauko / jatka, feidaa tai pysäytä juuri se cue.
 - **Playhead-tila:** iso GO seuraavalle cuelle ja ⏮ ⏭ playheadin siirtoon, kun cueja ajetaan järjestyksessä.
 - **"Musiikki alas + GO":** cuen voi asettaa feidaamaan Spotifyn pois samalla kun cue käynnistyy.
