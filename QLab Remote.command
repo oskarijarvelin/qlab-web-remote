@@ -7,4 +7,4 @@ if ! command -v node >/dev/null; then
   read -k1 '?Paina mitä tahansa näppäintä sulkeaksesi.'
   exit 1
 fi
-exec caffeinate -i node server.js
+exec node server.js

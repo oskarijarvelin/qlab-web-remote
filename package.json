@@ -5,6 +5,11 @@
   "description": "Mobile web remote for firing QLab cues over OSC",
   "main": "server.js",
   "scripts": {
-    "start": "caffeinate -i node server.js"
+    "start": "node server.js",
+    "service:install": "zsh scripts/service.sh install",
+    "service:uninstall": "zsh scripts/service.sh uninstall",
+    "service:status": "zsh scripts/service.sh status",
+    "service:log": "zsh scripts/service.sh log",
+    "service:restart": "zsh scripts/service.sh restart"
   }
 }

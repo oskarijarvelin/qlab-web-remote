@@ -47,6 +47,26 @@ Pysäytä palvelin terminaalissa **Ctrl+C**:llä tai sulkemalla ikkuna. (Ctrl+Z 
 
 Palvelin estää Macia menemästä lepotilaan niin kauan kuin se on käynnissä (`caffeinate`). Kannen sulkeminen nukuttaa Macin silti, ellei siihen ole kytketty ulkoista näyttöä.
 
+### Taustapalveluna (suositus keikoille)
+
+Palvelimen voi asentaa macOS:n taustapalveluksi (launchd). Silloin se käynnistyy automaattisesti kirjautuessa ja uudelleen parissa sekunnissa, jos se kaatuu. Puhelimet yhdistävät takaisin itsestään.
+
+```bash
+npm run service:install
+```
+
+| Komento | Mitä tekee |
+| --- | --- |
+| `npm run service:install` | Asentaa ja käynnistää. Aja uudelleen, jos repo siirtyy tai Node päivittyy. |
+| `npm run service:status` | Onko käynnissä, ja montako kertaa se on käynnistetty |
+| `npm run service:log` | Näyttää lokin (sama tuloste kuin terminaalissa, QR-koodi mukaan lukien) |
+| `npm run service:restart` | Käynnistää uudelleen, esim. kun `config.json` on muokattu käsin |
+| `npm run service:uninstall` | Pysäyttää ja poistaa |
+
+- Asennuksen aikana annetut `CONFIG` ja `PORT` välittyvät palveluun, esim. `CONFIG=keikat/gaala.json npm run service:install`.
+- Kun taustapalvelu on käynnissä, `npm start` ja `QLab Remote.command` ilmoittavat, että portti on jo käytössä.
+- macOS voi kysyä taustapalvelun ensimmäisellä käynnistyskerralla luvat verkkoyhteyksiin ja Spotifyn ohjaukseen. Jos kysymys ei näy, Spotify- tai verkkotoiminnot eivät ehkä toimi palveluna: tarkista asia ennen keikkaa.
+
 ## Tarkistuslista ennen tapahtumaa
 
 - [ ] QLab auki, oikea workspace edessä, OSC sallittu
@@ -114,8 +134,10 @@ tai useampi varakone listana:
 
 - **Komennot** (GO, FADE, STOP, playhead ja cuekohtaiset) lähtevät kaikkiin koneisiin yhtä aikaa. Komento onnistuu, jos ainakin yksi kone kuittaa sen. Muiden koneiden epäonnistuminen näkyy tilarivillä ⚠-varoituksena.
 - **Tila** näytetään pääkoneelta. Yläkulman merkki kertoo varakoneiden tilan: **VARA ✓** (kunnossa), **VARA ≠** (ei samassa tilassa) tai **VARA ✕** (ei yhteyttä). Useammalla varakoneella merkki näyttää vastaavien koneiden määrän, esim. **VARA 1/2 ✕**.
-- **Synkronointivahti:** jos jokin cue soi vain osalla koneista tai playhead on eri kohdassa yli 1,5 sekuntia, sivu varoittaa ja kertoo eron.
-- **Jos pääkone lakkaa vastaamasta,** sivu näyttää ensimmäisen vastaavan varakoneen tilan oranssilla ilmoituksella. Komennot menevät edelleen kaikkiin, joten pääkone jatkaa samasta kohdasta, jos se palaa.
+- **Synkronointivahti:** jos jokin cue soi vain osalla koneista tai playhead on eri kohdassa yli 1,5 sekuntia, sivu varoittaa, kertoo eron ja tarjoaa **Synkronoi**-napin.
+- **Synkronoi** tuo muut koneet näytettävän koneen tilaan: pysäyttää ylimääräiset cuet, käynnistää puuttuvat samasta kohdasta (`loadActionAt` + `start`), täsmää tauot ja siirtää playheadin.
+- **Jos pääkone lakkaa vastaamasta,** sivu näyttää ensimmäisen vastaavan varakoneen tilan oranssilla ilmoituksella. Komennot menevät edelleen kaikkiin koneisiin.
+- **Kun pääkone palaa,** se on jäänyt paitsi katkon aikaisista komennoista. Sivu näyttää silloin edelleen varakonetta ja ilmoittaa, että pääkone on jäljessä. Synkronoi tuo pääkoneen varakoneen tilaan, ja näkymä palaa pääkoneeseen, kun koneet ovat olleet samassa tilassa 1,5 sekuntia.
 - **Spotify ja Macin äänenvoimakkuus** ohjaavat vain sitä Macia, jolla palvelin pyörii.
 
 ### Palvelin omalla koneellaan

@@ -79,6 +79,9 @@
     #banner span { font-size: 13px; opacity: .9; }
     #warn { background: #4a3a08; color: #ffe08a; border-radius: 14px; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
     #warn strong { font-size: 14px; }
+    #warn .sync { flex: none; align-self: flex-start; margin-top: 6px; height: 36px; padding: 0 14px; border-radius: 10px;
+      font-size: 14px; background: #ffe08a; color: #3a2c00; }
+    #warn.active-backup .sync { background: #ffd0a0; color: #3a1d00; }
     header { gap: 10px; min-width: 0; }
     header h1 { flex: none; white-space: nowrap; }
     header .right { min-width: 0; }
@@ -224,7 +227,7 @@
 <body>
   <header><h1>QLab Remote</h1><span class="right"><span id="backup-chip" hidden></span><span id="conn">QLab</span><button id="edit-open" aria-label="Muokkaa nappeja" hidden>⚙</button></span></header>
   <div id="banner" role="alert" hidden><strong></strong><span></span></div>
-  <div id="warn" role="status" hidden><strong></strong><span></span></div>
+  <div id="warn" role="status" hidden><strong></strong><span></span><button class="sync" hidden>Synkronoi</button></div>
   <main id="main">
   <section id="playhead" class="empty" hidden>
     <div class="ph-info"><span class="ph-label">SEURAAVANA</span><span class="ph-num"></span><span class="ph-name">Ei cuea valmiina</span></div>
@@ -526,9 +529,11 @@
     let workspaceWarning = null;
     let backupWarning = null;
     function renderWarning() {
+      // [title, text, orange?, offer Synkronoi?]
       const w = backupWarning || workspaceWarning;
       warnEl.hidden = !w;
       warnEl.classList.toggle('active-backup', !!w?.[2]);
+      $('.sync', warnEl).hidden = !w?.[3];
       if (w) {
         $('strong', warnEl).textContent = w[0];
         $('span', warnEl).textContent = w[1];
@@ -551,14 +556,17 @@
         chip.textContent = machines.length === 1 ? 'VARA ' + mark : 'VARA ' + (machines.length - bad.length) + '/' + machines.length + ' ' + mark;
         chip.className = bad.length ? 'bad' : drift.length ? 'drift' : '';
         chip.title = machines.map(m => capitalize(m.label) + ' ' + m.host + ': ' + QLAB_STATE_TEXT[m.state]).join('\n');
-        if (b.active) {
-          connEl.textContent = 'QLab · ' + b.active;
+        if (b.active) connEl.textContent = 'QLab · ' + b.active;
+        if (b.active && b.main === 'ok' && b.mainOutOfSync) {
+          // The main machine is back but missed commands; the backup stays the reference until synced.
+          backupWarning = ['Pääkone palasi, mutta on jäljessä', b.mainOutOfSync + '. Näytetään ' + b.active + ', kunnes koneet on synkronoitu.', true, true];
+        } else if (b.active && b.main !== 'ok') {
           backupWarning = ['PÄÄKONE EI VASTAA – näytetään ' + b.active, 'Pääkone: ' + QLAB_STATE_TEXT[b.main] + '. Komennot menevät edelleen kaikkiin koneisiin.', true];
         } else if (bad.length && b.main === 'ok') {
           backupWarning = [bad.map(m => capitalize(m.label) + ': ' + QLAB_STATE_TEXT[m.state]).join(' · '),
             'Komennot eivät mene ' + (bad.length === 1 ? 'tälle koneelle' : 'näille koneille') + ' (' + bad.map(m => m.host).join(', ') + ').'];
         } else if (drift.length) {
-          backupWarning = [(drift.length === 1 ? capitalize(drift[0].label) + ' ei ole' : 'Varakoneet eivät ole') + ' samassa tilassa', drift.map(m => m.outOfSync).join(' · ')];
+          backupWarning = [(drift.length === 1 ? capitalize(drift[0].label) + ' ei ole' : 'Varakoneet eivät ole') + ' samassa tilassa', drift.map(m => m.outOfSync).join(' · '), false, true];
         }
       }
       renderWarning();
@@ -711,6 +719,8 @@
       if (config.fadeConfirm) doubleTap(fadeBtn, fade);
       else fadeBtn.addEventListener('click', fade);
       doubleTap(stopBtn, () => qlabCommand('/stop', stopBtn, 'STOP', [30, 50, 30]));
+      // Brings the other machines to the state of the one being shown.
+      $('.sync', warnEl).addEventListener('click', e => qlabCommand('/sync', e.currentTarget, 'Synkronointi', 30));
     }
 
     // --- Cue editor ---

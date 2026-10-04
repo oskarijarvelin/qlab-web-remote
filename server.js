@@ -4,7 +4,7 @@
 // Spotify (desktop app on the same Mac) is controlled and polled via AppleScript.
 const http = require('http');
 const crypto = require('crypto');
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
@@ -461,43 +461,130 @@ const backups = config.backups.map(({ name, ...b }) => new QlabConnection({ labe
 const allQlabs = [main, ...backups];
 const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
-// The QLab whose state is shown: the main machine, or the first answering backup while it is down.
-function activeQlab() {
-  if (main.state === 'ok') return main;
-  return backups.find((q) => q.state === 'ok') || main;
-}
-
-// Compares every other answering machine with the one being shown, so a backup that has drifted
-// out of step is noticed before it is needed. A difference has to last SYNC_GRACE_MS to count.
-const syncMismatchSince = new Map();
-function checkSync(reference, q) {
-  if (q === reference || reference.state !== 'ok' || q.state !== 'ok') { syncMismatchSince.delete(q); return null; }
+// What differs between two machines right now (cue running/paused state, playhead), or null.
+function diffReason(reference, q) {
   const describe = (c) => (!c?.found ? 'puuttuu' : c.paused ? 'tauolla' : c.running ? 'soi' : 'ei soi');
-  let reason = null;
   for (const cue of config.cues) {
     const a = describe(reference.cues[cue.number]);
     const b = describe(q.cues[cue.number]);
-    if (a !== b) { reason = `Cue ${cue.number} – ${reference.label}: ${a}, ${q.label}: ${b}`; break; }
+    if (a !== b) return `Cue ${cue.number} – ${reference.label}: ${a}, ${q.label}: ${b}`;
   }
-  if (!reason && config.playhead && (reference.playhead?.number || '') !== (q.playhead?.number || '')) {
-    reason = `Playhead – ${reference.label}: ${reference.playhead?.number || '–'}, ${q.label}: ${q.playhead?.number || '–'}`;
+  if (config.playhead && (reference.playhead?.number || '') !== (q.playhead?.number || '')) {
+    return `Playhead – ${reference.label}: ${reference.playhead?.number || '–'}, ${q.label}: ${q.playhead?.number || '–'}`;
   }
+  return null;
+}
+
+// Compares a machine with the one being shown, so one that has drifted out of step is noticed
+// before it is needed. A difference has to last SYNC_GRACE_MS to count.
+const syncMismatchSince = new Map();
+function checkSync(reference, q) {
+  const reason = q !== reference && reference.state === 'ok' && q.state === 'ok' ? diffReason(reference, q) : null;
   if (!reason) { syncMismatchSince.delete(q); return null; }
   if (!syncMismatchSince.has(q)) syncMismatchSince.set(q, Date.now());
   return Date.now() - syncMismatchSince.get(q) >= SYNC_GRACE_MS ? reason : null;
 }
 
+// The QLab whose state is shown and used as the reference for syncing. Normally the main machine;
+// while it is down, the first answering backup. When the main machine comes back it has missed the
+// commands sent meanwhile, so it only becomes the reference again once it matches the backup
+// (e.g. after pressing Synkronoi).
+let shownQlab = main;
+let mainMatchesSince = null;
+function chooseShownQlab() {
+  if (shownQlab.state !== 'ok') {
+    shownQlab = main.state === 'ok' ? main : backups.find((q) => q.state === 'ok') || main;
+    if (shownQlab !== main) log(`Showing ${shownQlab.label} (pääkone: ${main.state})`);
+  } else if (shownQlab !== main && main.state === 'ok') {
+    if (diffReason(shownQlab, main)) {
+      mainMatchesSince = null;
+    } else {
+      mainMatchesSince ??= Date.now();
+      if (Date.now() - mainMatchesSince >= SYNC_GRACE_MS) {
+        log(`Pääkone matches ${shownQlab.label} again, showing pääkone`);
+        shownQlab = main;
+        mainMatchesSince = null;
+      }
+    }
+  }
+  return shownQlab;
+}
+
+function activeQlab() {
+  return shownQlab;
+}
+
 function updateStatus() {
-  const q = activeQlab();
+  const q = chooseShownQlab();
   status.qlab = q.state;
   status.cues = q.cues;
   status.playhead = q.playhead;
   status.workspace = q.ws;
   status.backups = backups.length ? {
-    active: q === main ? null : q.label, // the main machine is down and this backup is being shown
+    active: q === main ? null : q.label, // a backup is being shown (the main machine is down or behind)
     main: main.state,
+    mainOutOfSync: q === main ? null : checkSync(q, main),
     machines: backups.map((b) => ({ label: b.label, host: b.host, state: b.state, outOfSync: checkSync(q, b) })),
   } : null;
+}
+
+// Brings one machine to the state of the reference: stops cues the reference isn't playing, starts
+// missing ones from the reference's current position (loadActionAt, then start), matches pause
+// state and moves the playhead. Returns a list of what was done.
+async function syncMachine(reference, q) {
+  const done = [];
+  for (const cue of config.cues) {
+    const n = cue.number;
+    const r = reference.cues[n];
+    const t = q.cues[n];
+    if (!r?.found || !t?.found) continue;
+    const refActive = r.running || r.paused;
+    const active = t.running || t.paused;
+    if (!refActive && active) {
+      await q.request(`/cue/${n}/stop`);
+      done.push(`stop ${n}`);
+    } else if (refActive && !active) {
+      // Ask for the position now rather than using the last poll (up to 250 ms old).
+      const reply = await reference.request(`/cue/${n}/actionElapsed`);
+      const askedAt = Date.now();
+      const elapsed = Number(reply.data) || r.elapsed;
+      await q.request(`/cue/${n}/loadActionAt`, [elapsed + (Date.now() - askedAt) / 1000]);
+      await q.request(`/cue/${n}/start`);
+      if (r.paused) await q.request(`/cue/${n}/pause`);
+      done.push(`start ${n} @ ${elapsed.toFixed(1)} s`);
+    } else if (r.paused && t.running) {
+      await q.request(`/cue/${n}/pause`);
+      done.push(`pause ${n}`);
+    } else if (r.running && t.paused) {
+      await q.request(`/cue/${n}/resume`);
+      done.push(`resume ${n}`);
+    }
+  }
+  if (config.playhead) {
+    const want = reference.playhead?.number || '';
+    if (want !== (q.playhead?.number || '') && (want || !reference.playhead)) {
+      await q.request(want ? `/playhead/${want}` : '/playhead/none');
+      done.push(`playhead ${want || '–'}`);
+    }
+  }
+  return done;
+}
+
+// Syncs every other answering machine to the one being shown.
+async function syncAll() {
+  const reference = shownQlab;
+  if (reference.state !== 'ok') throw new QlabError('Ei synkronoitavaa: näytettävä QLab ei vastaa', 503);
+  const parts = [];
+  for (const q of allQlabs) {
+    if (q === reference || q.state !== 'ok') continue;
+    try {
+      const done = await syncMachine(reference, q);
+      if (done.length) parts.push(`${q.label}: ${done.join(', ')}`);
+    } catch (err) {
+      throw new QlabError(`${capitalize(q.label)}: ${err.message}`, err.httpStatus || 502);
+    }
+  }
+  return parts;
 }
 
 // Sends a command to every QLab at the same time. Succeeds if at least one of them confirmed it;
@@ -824,6 +911,19 @@ const server = http.createServer(async (req, res) => {
 
   if (method === 'POST' && url === '/stop') return runQlabCommand(req, res, 'STOP kaikki', '/stop');
 
+  if (method === 'POST' && url === '/sync' && backups.length) {
+    try {
+      const parts = await syncAll();
+      recordCommand(req, `Synkronoitu – lähde: ${shownQlab.label}` + (parts.length ? '' : ' (ei muutoksia)'));
+      if (parts.length) log(`  ${parts.join(' · ')}`);
+      res.writeHead(204);
+      return res.end();
+    } catch (err) {
+      recordCommand(req, 'Synkronointi', err.message);
+      return sendText(res, err.httpStatus || 500, err.message);
+    }
+  }
+
   const playheadMatch = method === 'POST' && config.playhead && url.match(/^\/playhead\/(go|next|previous)$/);
   if (playheadMatch) {
     const action = playheadMatch[1];
@@ -907,6 +1007,24 @@ function localHostname() {
   } catch {
     return null;
   }
+}
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\nPortti ${config.port} on jo käytössä. Palvelin on ehkä jo käynnissä, esimerkiksi taustapalveluna`);
+    console.error('(tarkista: npm run service:status), tai toinen ohjelma käyttää samaa porttia.\n');
+    // Exit code 0 so the background service doesn't keep retrying while another copy holds the port.
+    process.exit(0);
+  }
+  throw err;
+});
+
+// Keep the Mac awake for as long as this process runs, however it was started (terminal,
+// QLab Remote.command or the background service). caffeinate -w exits together with us.
+if (process.platform === 'darwin') {
+  const caffeinate = spawn('caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' });
+  caffeinate.on('error', () => console.error('caffeinate failed; the Mac may go to sleep'));
+  caffeinate.unref();
 }
 
 server.listen(config.port, '0.0.0.0', () => {
