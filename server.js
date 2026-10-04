@@ -215,7 +215,8 @@ const APP_LEVEL = new Set(['/alwaysReply', '/workspaces', '/version']);
 // qlab: 'offline' (no TCP connection), 'noworkspace' (the configured workspace isn't open),
 // 'noreply' (no workspace answering), 'badpass' (wrong passcode), 'denied' (no permissions) or 'ok'.
 // workspace: the targeted workspace's name (if known) and the names of all open workspaces.
-const status = { qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] }, spotify: { running: false } };
+// lastCommand: the most recent command from any phone, so every phone can show who did what.
+const status = { qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] }, spotify: { running: false }, lastCommand: null };
 let qlabSocket = null;
 let lastStatusReply = 0;
 let lastDenied = 0;
@@ -532,18 +533,43 @@ setInterval(() => {
 const indexHtml = fs.readFileSync(path.join(__dirname, 'index.html'));
 const log = (msg) => console.log(`${new Date().toLocaleTimeString()}  ${msg}`);
 
-async function runQlabCommand(res, label, address, args) {
+// Which phone sent a request: the name the user gave it on the page (X-Device), or a guess from the
+// browser and the last part of its IP address, e.g. "iPhone (.42)". X-Device-Id lets a phone
+// recognise its own commands.
+function deviceOf(req) {
+  let name = '';
+  try { name = decodeURIComponent(String(req.headers['x-device'] || '')).trim().slice(0, 40); } catch { /* bad encoding */ }
+  if (!name) {
+    const ua = req.headers['user-agent'] || '';
+    const kind = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+      : /Macintosh/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Selain';
+    const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    name = ip === '127.0.0.1' || ip === '::1' ? `${kind} (tämä kone)` : `${kind} (.${ip.split(/[.:]/).pop()})`;
+  }
+  return { name, id: String(req.headers['x-device-id'] || '').slice(0, 40) };
+}
+
+function recordCommand(req, text, error) {
+  const device = deviceOf(req);
+  status.lastCommand = { text, device: device.name, deviceId: device.id, at: Date.now(), ok: !error, error: error || null };
+  log(`${text} [${device.name}]${error ? ' FAILED: ' + error : ''}`);
+}
+
+async function runQlabCommand(req, res, text, address, args) {
   try {
     await qlabRequest(address, args);
-    log(label);
+    recordCommand(req, text);
     res.writeHead(204);
     res.end();
   } catch (err) {
-    log(`${label} FAILED: ${err.message}`);
+    recordCommand(req, text, err.message);
     res.writeHead(err.httpStatus || 500, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(err.message);
   }
 }
+
+// "GO 1 · Intro" for messages shown to people.
+const cueText = (cue) => `${cue.number}${cue.label ? ' · ' + cue.label : ''}`;
 
 function sendJson(res, data) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -646,6 +672,7 @@ const server = http.createServer(async (req, res) => {
       return sendText(res, 500, 'Tallennus epäonnistui: ' + err.message);
     }
     log(`Cues saved to ${path.basename(CONFIG_FILE)}: ${cues.map((c) => c.number).join(', ') || '(none)'}`);
+    recordCommand(req, 'Napit päivitetty');
     broadcast('event: config\ndata: {}\n\n');
     res.writeHead(204);
     return res.end();
@@ -662,19 +689,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === 'POST' && url === '/fade') {
-    return runQlabCommand(res, `FADE all (${config.fadeSeconds}s)`, '/panicInTime', [config.fadeSeconds]);
+    return runQlabCommand(req, res, `FADE kaikki (${config.fadeSeconds} s)`, '/panicInTime', [config.fadeSeconds]);
   }
 
-  if (method === 'POST' && url === '/stop') return runQlabCommand(res, 'STOP all', '/stop');
+  if (method === 'POST' && url === '/stop') return runQlabCommand(req, res, 'STOP kaikki', '/stop');
 
   const playheadMatch = method === 'POST' && config.playhead && url.match(/^\/playhead\/(go|next|previous)$/);
   if (playheadMatch) {
     const action = playheadMatch[1];
     if (action === 'go') {
-      const cue = status.playhead ? `${status.playhead.number || '?'} ${status.playhead.name}` : '(none)';
-      return runQlabCommand(res, `GO playhead ${cue}`, '/go');
+      const cue = status.playhead ? `${status.playhead.number || '?'} · ${status.playhead.name}` : '(ei cuea valmiina)';
+      return runQlabCommand(req, res, `GO ${cue}`, '/go');
     }
-    return runQlabCommand(res, `Playhead ${action}`, `/playhead/${action}`);
+    return runQlabCommand(req, res, action === 'next' ? 'Playhead alas' : 'Playhead ylös', `/playhead/${action}`);
   }
 
   const spotifyMatch = method === 'POST' && config.spotify && url.match(/^\/spotify\/(\w+)(?:\/(\d+))?$/);
@@ -684,14 +711,17 @@ const server = http.createServer(async (req, res) => {
     if (action === 'volume' && value !== undefined) script = `tell application "Spotify" to set sound volume to ${Math.min(100, Number(value))}`;
     else if (SPOTIFY_COMMANDS[action]) script = `tell application "Spotify" to ${SPOTIFY_COMMANDS[action]}`;
     if (!script) return sendText(res, 404, 'Unknown Spotify command');
+    // Volume changes arrive many times a second while dragging; they aren't worth announcing.
+    const text = { playpause: status.spotify?.state === 'playing' ? 'Spotify tauko' : 'Spotify toisto', next: 'Spotify seuraava', previous: 'Spotify edellinen' }[action];
     try {
       await osascript(script);
-      log(`Spotify ${action}${value !== undefined ? ' ' + value : ''}`);
+      if (text) recordCommand(req, text);
       refreshSpotify();
       res.writeHead(204);
       return res.end();
     } catch (err) {
       console.error(err.message);
+      if (text) recordCommand(req, text, 'Spotify ei vastannut');
       return sendText(res, 500, 'Spotify command failed');
     }
   }
@@ -701,9 +731,10 @@ const server = http.createServer(async (req, res) => {
     const cue = decodeURIComponent(cueMatch[1]);
     if (!cueConfig.has(cue)) return sendText(res, 404, 'Unknown cue');
     const action = cueMatch[2];
-    if (action === 'pause') return runQlabCommand(res, `Toggle pause cue ${cue}`, `/cue/${cue}/togglePause`);
-    if (action === 'stop') return runQlabCommand(res, `STOP cue ${cue}`, `/cue/${cue}/stop`);
-    return runQlabCommand(res, `FADE cue ${cue} (${config.fadeSeconds}s)`, `/cue/${cue}/panicInTime`, [config.fadeSeconds]);
+    const name = cueText(cueConfig.get(cue));
+    if (action === 'pause') return runQlabCommand(req, res, `Tauko/jatka ${name}`, `/cue/${cue}/togglePause`);
+    if (action === 'stop') return runQlabCommand(req, res, `STOP ${name}`, `/cue/${cue}/stop`);
+    return runQlabCommand(req, res, `FADE ${name} (${config.fadeSeconds} s)`, `/cue/${cue}/panicInTime`, [config.fadeSeconds]);
   }
 
   const goMatch = method === 'POST' && url.match(/^\/go\/([^/]+)$/);
@@ -711,8 +742,9 @@ const server = http.createServer(async (req, res) => {
     const cue = cueConfig.get(decodeURIComponent(goMatch[1]));
     if (!cue) return sendText(res, 404, 'Unknown cue');
     // Music fades while the cue starts; waiting for the fade would feel like lag to the operator.
-    if (cue.spotifyFadeOut && config.spotify && status.spotify?.state === 'playing') fadeOutSpotify(config.spotifyFadeSeconds);
-    return runQlabCommand(res, `GO cue ${cue.number}`, `/cue/${cue.number}/start`);
+    const fadeMusic = cue.spotifyFadeOut && config.spotify && status.spotify?.state === 'playing';
+    if (fadeMusic) fadeOutSpotify(config.spotifyFadeSeconds);
+    return runQlabCommand(req, res, `GO ${cueText(cue)}${fadeMusic ? ' + musiikki alas' : ''}`, `/cue/${cue.number}/start`);
   }
 
   sendText(res, 404, 'Not found');

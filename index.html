@@ -124,7 +124,13 @@
       .cue .title { font-size: 26px; }
       .stops { flex-basis: 72px; }
     }
-    #status { text-align: center; font-size: 14px; color: #888; min-height: 1.2em; }
+    #status { text-align: center; font-size: 14px; color: #999; min-height: 1.2em; border-radius: 8px; padding: 2px 6px;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+    #status .who { color: #ddd; font-weight: 600; }
+    #status.fail { color: #ff8a80; }
+    /* Briefly highlight commands sent from another phone. */
+    #status.fresh { animation: fresh 2s ease-out; }
+    @keyframes fresh { from { background: #2f5d9e; color: #fff; } }
 
     header .right { display: flex; align-items: center; gap: 12px; }
     #edit-open { flex: none; width: 36px; height: 36px; border-radius: 10px; background: #222; font-size: 18px; color: #aaa; }
@@ -171,6 +177,9 @@
     .ed-body h3 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #888; margin: 24px 0 8px; }
     .ed-body ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
     .ed-err { color: #ff6b61; margin: 0; min-height: 0; }
+    .ed-body > h3:first-of-type { margin-top: 8px; }
+    .ed-device { width: 100%; font-size: 16px; padding: 10px 12px; border-radius: 10px; border: 1px solid #333; background: #111; color: #fff; }
+    .ed-hint { font-size: 13px; color: #888; margin: 6px 0 0; }
     .ed-err:empty { display: none; }
     .ed-empty { color: #888; text-align: center; }
     .ed-list li { background: #1f1f1f; border-radius: 12px; padding: 10px; display: grid; gap: 8px;
@@ -235,16 +244,22 @@
     <div class="panel">
       <div class="ed-head">
         <button class="ed-cancel">Peruuta</button>
-        <h2>Napit</h2>
+        <h2>Asetukset</h2>
         <button class="ed-save">Tallenna</button>
       </div>
       <div class="ed-body">
         <p class="ed-err" role="alert"></p>
-        <ul class="ed-list"></ul>
-        <p class="ed-empty">Ei nappeja. Lisää cueja alta.</p>
-        <h3>Lisää QLabista</h3>
-        <input class="ed-search" type="search" placeholder="Hae numerolla tai nimellä" aria-label="Hae cueja">
-        <ul class="ed-qlab"><li class="ed-note">Haetaan cue-listaa…</li></ul>
+        <h3>Tämä laite</h3>
+        <input class="ed-device" type="text" maxlength="40" placeholder="esim. Oskarin iPhone" aria-label="Tämän laitteen nimi">
+        <p class="ed-hint">Nimi näkyy muille puhelimille, kun lähetät komennon. Tyhjänä näytetään laitteen tyyppi ja IP-osoitteen loppu.</p>
+        <div class="ed-cues">
+          <h3>Napit</h3>
+          <ul class="ed-list"></ul>
+          <p class="ed-empty">Ei nappeja. Lisää cueja alta.</p>
+          <h3>Lisää QLabista</h3>
+          <input class="ed-search" type="search" placeholder="Hae numerolla tai nimellä" aria-label="Hae cueja">
+          <ul class="ed-qlab"><li class="ed-note">Haetaan cue-listaa…</li></ul>
+        </div>
       </div>
     </div>
   </div>
@@ -283,7 +298,6 @@
     let config = null;
     let lastStatus = null;
 
-    const now = () => new Date().toLocaleTimeString('fi-FI');
 
     // QLab names cues after their media file by default; the extension is just noise on a button.
     const displayName = name => (name || '').replace(/\.(wav|mp3|aiff?|m4a|aac|flac|ogg|mov|mp4|m4v|png|jpe?g|gif)$/i, '');
@@ -293,24 +307,44 @@
       return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
     }
 
+    // --- This device ---
+    // A random id lets the page recognise its own commands in the shared status line; the name is
+    // what other phones see. Both live in this browser only.
+    function stored(key, make) {
+      try {
+        let value = localStorage.getItem(key);
+        if (value === null && make) { value = make(); localStorage.setItem(key, value); }
+        return value || '';
+      } catch { return make ? make() : ''; }
+    }
+    const deviceId = stored('qlr-device-id', () => Math.random().toString(36).slice(2, 12));
+    let deviceName = stored('qlr-device-name');
+
+    function deviceHeaders(extra = {}) {
+      const headers = { 'X-Device-Id': deviceId, ...extra };
+      if (deviceName) headers['X-Device'] = encodeURIComponent(deviceName);
+      return headers;
+    }
+
     // Sends a QLab command. The server only answers once QLab has confirmed it, so the button
-    // stays in a "pending" state until then and turns green (ok) or red (error).
+    // stays in a "pending" state until then and turns green (ok) or red (error). The status line
+    // is filled from the server's lastCommand, so every phone sees the same message.
     async function qlabCommand(url, btn, label, vibration) {
       if (btn.classList.contains('pending')) return false;
       btn.classList.remove('ok', 'err');
       btn.classList.add('pending');
       let ok = false;
       try {
-        const res = await fetch(url, { method: 'POST' });
+        const res = await fetch(url, { method: 'POST', headers: deviceHeaders() });
         if (res.status === 401) { showLogin(); return false; }
         if (!res.ok) throw new Error(await res.text() || res.statusText);
         btn.classList.add('ok');
-        statusEl.textContent = label + ' – ' + now();
         if (navigator.vibrate) navigator.vibrate(vibration);
         ok = true;
       } catch (e) {
         btn.classList.add('err');
-        statusEl.textContent = label + ' epäonnistui: ' + (e.message === 'Failed to fetch' ? 'ei yhteyttä palvelimeen' : e.message);
+        // The server couldn't record this one, so say it here.
+        if (e.message === 'Failed to fetch') showLocalStatus(label + ' epäonnistui: ei yhteyttä palvelimeen', true);
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
       } finally {
         btn.classList.remove('pending');
@@ -388,11 +422,11 @@
 
     async function spotify(cmd) {
       try {
-        const res = await fetch('/spotify/' + cmd, { method: 'POST' });
+        const res = await fetch('/spotify/' + cmd, { method: 'POST', headers: deviceHeaders() });
         if (res.status === 401) return showLogin();
         if (!res.ok) throw new Error(await res.text());
       } catch (e) {
-        statusEl.textContent = 'Virhe: ' + e.message;
+        if (e.message === 'Failed to fetch') showLocalStatus('Spotify-komento epäonnistui: ei yhteyttä palvelimeen', true);
       }
     }
 
@@ -474,8 +508,33 @@
       $('.ph-name', playheadEl).textContent = p ? (p.name || p.type) : 'Ei cuea valmiina';
     }
 
+    function showLocalStatus(text, fail) {
+      statusEl.classList.remove('fresh');
+      statusEl.classList.toggle('fail', !!fail);
+      statusEl.textContent = text;
+    }
+
+    // Shows the latest command from any phone: "GO 1 · Intro — Oskarin iPhone · 12:34:05".
+    // Redrawn only when a new command arrives, so a local error message isn't overwritten.
+    let shownCommandAt = null;
+    function renderLastCommand(c) {
+      if (!c || c.at === shownCommandAt) return;
+      const firstRender = shownCommandAt === null;
+      shownCommandAt = c.at;
+      const mine = c.deviceId && c.deviceId === deviceId;
+      statusEl.replaceChildren(
+        (c.ok ? '' : '✕ ') + c.text + ' — ',
+        el('span', { className: 'who', textContent: mine ? 'sinä' : c.device }),
+        ' · ' + new Date(c.at).toLocaleTimeString('fi-FI') + (c.ok ? '' : ': ' + c.error));
+      statusEl.title = statusEl.textContent;
+      statusEl.classList.toggle('fail', !c.ok);
+      statusEl.classList.remove('fresh');
+      if (!mine && !firstRender) { void statusEl.offsetWidth; statusEl.classList.add('fresh'); }
+    }
+
     function render(status) {
       lastStatus = status;
+      renderLastCommand(status.lastCommand);
       renderConnection(status.qlab, status.workspace);
       if (config.spotify) renderSpotify(status.spotify);
       if (config.playhead) renderPlayhead(status.playhead);
@@ -558,7 +617,8 @@
       }));
 
       sp.hidden = !config.spotify;
-      $('#edit-open').hidden = !config.cuesEditable;
+      $('#edit-open').hidden = false;
+      $('.ed-cues', editorEl).hidden = !config.cuesEditable;
 
       const fade = () => qlabCommand('/fade', fadeBtn, 'FADE', 30);
       $('small', fadeBtn).textContent = config.fadeSeconds + ' s' + (config.fadeConfirm ? ' · 2× napautus' : '');
@@ -590,9 +650,12 @@
       draft = config.cues.map(c => ({ ...c }));
       $('.ed-err', editorEl).textContent = '';
       $('.ed-search', editorEl).value = '';
+      $('.ed-device', editorEl).value = deviceName;
       editorEl.hidden = false;
-      renderDraft();
-      loadQlabCues();
+      if (config.cuesEditable) {
+        renderDraft();
+        loadQlabCues();
+      }
     }
 
     function closeEditor() {
@@ -693,8 +756,12 @@
     $('.ed-save', editorEl).addEventListener('click', async () => {
       const err = $('.ed-err', editorEl);
       err.textContent = '';
+      deviceName = $('.ed-device', editorEl).value.trim();
+      try { localStorage.setItem('qlr-device-name', deviceName); } catch { /* private mode: name lasts until reload */ }
+      // Only touch the buttons if they changed: saving reloads every phone.
+      if (!config.cuesEditable || JSON.stringify(draft) === JSON.stringify(config.cues)) return closeEditor();
       try {
-        const res = await fetch('/config/cues', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft) });
+        const res = await fetch('/config/cues', { method: 'PUT', headers: deviceHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(draft) });
         if (res.status === 401) return showLogin();
         if (!res.ok) throw new Error(await res.text());
         location.reload();

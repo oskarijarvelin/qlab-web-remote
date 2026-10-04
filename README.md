@@ -13,8 +13,9 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 - **STOP** pysäyttää kaikki cuet heti. Vaatii tuplanapautuksen vahinkopainallusten välttämiseksi.
 - **Spotify**: soiva kappale ja edistyminen, edellinen / toista-tauko / seuraava sekä äänenvoimakkuus.
 - **Yhteyskatko näkyy:** jos puhelin ei saa yhteyttä palvelimeen tai palvelin QLabiin, näytön yläreunaan tulee punainen ilmoitus ja QLab-napit harmaantuvat.
+- **Useampi puhelin:** kaikki näkevät saman tilan, ja alareunan tilarivi kertoo kaikille viimeisimmän komennon, kuka sen lähetti ja milloin (esim. "GO 1 · Intro — Valomiehen Android · 12.37.30"). Toisen puhelimen komento välähtää sinisenä. Laitteelle voi antaa nimen ⚙-paneelissa. Ilman nimeä näytetään laitteen tyyppi ja IP-osoitteen loppu, esim. "iPhone (.42)".
 - **Valinnainen PIN** jaettuihin verkkoihin ja tuki QLabin **passcodelle**.
-- **Napit valitaan puhelimella:** ⚙-napista aukeaa editori, jossa cuet lisätään suoraan QLabin cue-listasta ja niille annetaan teksti, väri ja Spotify-feidi. Muutokset tallentuvat `config.json`:iin ja päivittyvät kaikkiin avoimiin puhelimiin.
+- **Napit valitaan puhelimella:** ⚙-paneelissa on editori, jossa cuet lisätään suoraan QLabin cue-listasta ja niille annetaan teksti, väri ja Spotify-feidi. Muutokset tallentuvat `config.json`:iin ja päivittyvät kaikkiin avoimiin puhelimiin.
 - **Tabletti ja vaakanäkymä:** leveällä näytöllä cuet ovat vasemmalla ruudukossa ja FADE, STOP ja Spotify oikealla.
 - **Koti-valikon kuvake:** sivun voi lisätä puhelimen Koti-valikkoon omana sovelluksenaan.
 
