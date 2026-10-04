@@ -80,17 +80,24 @@ Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.exa
 | `spotify` | `true` | `false` = piilota Spotify-osio |
 | `spotifyFadeSeconds` | `2` | Spotify-feidin pituus "musiikki alas" -cueissa |
 | `pin` | (ei) | Sivu kysyy tämän PIN-koodin kerran per laite |
+| `qlabWorkspace` | (ei) | Ohjattavan workspacen nimi (esim. `Gaala` tai `Gaala.qlab5`) tai tunnus. Ilman tätä komennot menevät kaikkiin avoimiin workspaceihin. |
 | `qlabPasscode` | (ei) | QLab-workspacen OSC-passcode |
 | `port` | `8080` | Web-palvelimen portti |
 | `qlabHost` | `127.0.0.1` | QLab-koneen osoite |
 | `qlabPort` | `53000` | QLabin OSC-portti |
 
-Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_PASSCODE`, `PORT`, `QLAB_HOST`, `QLAB_PORT`.
+Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_WORKSPACE`, `QLAB_PASSCODE`, `PORT`, `QLAB_HOST`, `QLAB_PORT`.
+
+### Useampi workspace tai QLab
+
+- **Monta workspacea auki samassa QLabissa:** ilman `qlabWorkspace`-asetusta QLab 5 välittää komennot kaikkiin avoimiin workspaceihin. Esimerkiksi GO cue 1 käynnistää cuen 1 jokaisessa workspacessa, jossa sellainen on. Sivu varoittaa tästä keltaisella ilmoituksella. Valitse ohjattava workspace asetuksella `qlabWorkspace`, jolloin muut workspacet eivät saa komentoja. Jos valittu workspace ei ole auki, sivu näyttää punaisen ilmoituksen eikä lähetä komentoja.
+- **QLab muilla koneilla:** palvelin ohjaa vain osoitteessa `qlabHost` olevaa QLabia (oletuksena tämä Mac). Muut koneet verkossa eivät vaikuta siihen. Jos koneita on useampi, aja jokaisella omaa palvelinta.
 
 ## Miten se toimii
 
 - Palvelin pitää QLabiin yhden OSC-yhteyden TCP:n yli (portti 53000, SLIP-kehystys) ja pyytää yhteyden alussa `/alwaysReply 1`, jotta QLab kuittaa myös toimintokomennot.
-- Jos `qlabPasscode` on asetettu, palvelin lähettää ensin `/connect {passcode}`.
+- Palvelin tarkistaa avoimet workspacet (`/workspaces`) kahden sekunnin välein. Kun `qlabWorkspace` on asetettu, kaikki workspace-komennot osoitetaan muodossa `/workspace/{tunnus}/…`.
+- Jos `qlabPasscode` on asetettu, palvelin lähettää ensin `/connect {passcode}` (valittuun workspaceen, kun se on löytynyt).
 - Komennot (`/cue/{n}/start`, `/cue/{n}/togglePause`, `/cue/{n}/stop`, `/cue/{n}/panicInTime`, `/go`, `/playhead/next`, `/playhead/previous`, `/panicInTime`, `/stop`) odottavat QLabin vastausta enintään sekunnin ennen kuin puhelimelle vastataan.
 - Cuejen ja playheadin tila kysytään (`/cue/{n}/valuesForKeys`, `/cue/playhead/valuesForKeys`) neljä kertaa sekunnissa ja välitetään sivulle Server-Sent Events -yhteydellä. Jos vastauksia ei tule kahteen sekuntiin, sivu näyttää "QLab ei vastaa".
 - Spotifyta ohjataan ja sen tila luetaan AppleScriptillä (`osascript`) kerran sekunnissa. "Musiikki alas" laskee äänenvoimakkuuden nollaan, pysäyttää toiston ja palauttaa äänenvoimakkuuden ennalleen.

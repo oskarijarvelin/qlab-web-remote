@@ -56,6 +56,7 @@ function loadConfig() {
     qlabHost: '127.0.0.1',
     qlabPort: 53000,
     qlabPasscode: '',
+    qlabWorkspace: '',
     pin: '',
     fadeSeconds: 2,
     fadeConfirm: false,
@@ -69,6 +70,7 @@ function loadConfig() {
   if (env.QLAB_HOST) c.qlabHost = env.QLAB_HOST;
   if (env.QLAB_PORT) c.qlabPort = Number(env.QLAB_PORT);
   if (env.QLAB_PASSCODE) c.qlabPasscode = env.QLAB_PASSCODE;
+  if (env.QLAB_WORKSPACE) c.qlabWorkspace = env.QLAB_WORKSPACE;
   if (env.PIN) c.pin = env.PIN;
   if (env.FADE_SECONDS) c.fadeSeconds = Number(env.FADE_SECONDS);
   if (env.FADE_CONFIRM) c.fadeConfirm = env.FADE_CONFIRM === '1';
@@ -203,17 +205,24 @@ const POLL_MS = 250;
 const COMMAND_TIMEOUT_MS = 1000;
 // If status polls go unanswered this long, QLab is reachable but not responding (e.g. no workspace open).
 const STALE_MS = 2000;
+// Open workspaces are re-checked every this many polls (2 s), to notice one being opened or closed.
+const WORKSPACE_CHECK_EVERY = 8;
 const STATUS_KEYS = JSON.stringify(['displayName', 'isRunning', 'isPaused', 'duration', 'actionElapsed']);
 const PLAYHEAD_KEYS = JSON.stringify(['number', 'displayName', 'type']);
+// Messages addressed to QLab itself rather than to a workspace; never prefixed with /workspace/{id}.
+const APP_LEVEL = new Set(['/alwaysReply', '/workspaces', '/version']);
 
-// qlab: 'offline' (no TCP connection), 'noreply' (no workspace answering), 'badpass' (wrong passcode),
-// 'denied' (connection lacks permissions) or 'ok'.
-const status = { qlab: 'offline', cues: {}, playhead: null, spotify: { running: false } };
+// qlab: 'offline' (no TCP connection), 'noworkspace' (the configured workspace isn't open),
+// 'noreply' (no workspace answering), 'badpass' (wrong passcode), 'denied' (no permissions) or 'ok'.
+// workspace: the targeted workspace's name (if known) and the names of all open workspaces.
+const status = { qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] }, spotify: { running: false } };
 let qlabSocket = null;
 let lastStatusReply = 0;
 let lastDenied = 0;
 let badPasscode = false;
-// Pending command replies keyed by the OSC address that was sent; QLab replies to /x on /reply/x.
+// uniqueID of the workspace named in qlabWorkspace, once it has been found among the open ones.
+let workspaceId = null;
+// Pending command replies keyed by the OSC address that was sent (without any /workspace/{id} prefix).
 const pending = new Map();
 
 class QlabError extends Error {
@@ -223,8 +232,22 @@ class QlabError extends Error {
   }
 }
 
+// Without qlabWorkspace, messages go to every open workspace (QLab 5 behaviour). With it, they
+// are addressed to that one workspace by its unique ID (display names may contain spaces).
+function addressFor(address) {
+  if (!config.qlabWorkspace || APP_LEVEL.has(address)) return address;
+  return `/workspace/${workspaceId}${address}`;
+}
+
+function send(address, args) {
+  qlabSocket?.write(slipEncode(encodeOsc(addressFor(address), args)));
+}
+
 function qlabRequest(address, args) {
   if (!qlabSocket) return Promise.reject(new QlabError('Ei yhteyttä QLabiin', 503));
+  if (config.qlabWorkspace && !workspaceId) {
+    return Promise.reject(new QlabError(`Workspace "${config.qlabWorkspace}" ei ole auki QLabissa`, 503));
+  }
   return new Promise((resolve, reject) => {
     const entry = { resolve, reject };
     entry.timer = setTimeout(() => {
@@ -233,11 +256,43 @@ function qlabRequest(address, args) {
     }, COMMAND_TIMEOUT_MS);
     if (!pending.has(address)) pending.set(address, []);
     pending.get(address).push(entry);
-    qlabSocket.write(slipEncode(encodeOsc(address, args)));
+    send(address, args);
   });
 }
 
+// Matches qlabWorkspace against an open workspace's unique ID or display name ("Gala" or "Gala.qlab5").
+function findWorkspace(list) {
+  const plain = (name) => String(name || '').toLowerCase().replace(/\.qlab5$/, '');
+  const want = plain(config.qlabWorkspace);
+  return list.find((w) => plain(w.uniqueID) === want || plain(w.displayName) === want) || null;
+}
+
+function handleWorkspaces(list) {
+  status.workspace.open = list.map((w) => w.displayName);
+  if (!config.qlabWorkspace) {
+    status.workspace.name = list.length === 1 ? list[0].displayName : null;
+    return;
+  }
+  const ws = findWorkspace(list);
+  status.workspace.name = ws ? ws.displayName : null;
+  if ((ws?.uniqueID || null) === workspaceId) return;
+
+  workspaceId = ws?.uniqueID || null;
+  status.cues = {};
+  status.playhead = null;
+  badPasscode = false;
+  if (ws) {
+    log(`Workspace: ${ws.displayName}`);
+    lastStatusReply = Date.now(); // grace period for the first polls
+    if (config.qlabPasscode) send('/connect', [config.qlabPasscode]);
+  } else {
+    log(`Workspace "${config.qlabWorkspace}" is not open (open: ${status.workspace.open.join(', ') || 'none'})`);
+  }
+}
+
 function handleReply(address, reply) {
+  if (address === '/workspaces') return handleWorkspaces(Array.isArray(reply.data) ? reply.data : []);
+
   if (address === '/connect') {
     badPasscode = reply.status === 'badpass' || reply.data === 'badpass';
     console.log(badPasscode ? 'QLab rejected the passcode' : 'QLab passcode accepted');
@@ -283,6 +338,7 @@ function handleReply(address, reply) {
 
 function qlabState() {
   if (!qlabSocket) return 'offline';
+  if (config.qlabWorkspace && !workspaceId) return 'noworkspace';
   if (badPasscode) return 'badpass';
   if (Date.now() - lastDenied < STALE_MS) return 'denied';
   return Date.now() - lastStatusReply < STALE_MS ? 'ok' : 'noreply';
@@ -291,20 +347,26 @@ function qlabState() {
 function connectQlab() {
   const sock = net.createConnection({ host: config.qlabHost, port: config.qlabPort });
   let pollTimer = null;
-  const send = (address, args) => sock.write(slipEncode(encodeOsc(address, args)));
 
   sock.on('connect', () => {
     qlabSocket = sock;
     badPasscode = false;
+    workspaceId = null;
     lastStatusReply = Date.now(); // grace period so the first poll isn't reported as unanswered
     console.log('Connected to QLab');
-    // The passcode must come before any other message.
-    if (config.qlabPasscode) send('/connect', [config.qlabPasscode]);
+    // The passcode must come before any other message to the workspace. With qlabWorkspace it is
+    // sent once that workspace has been found (see handleWorkspaces).
+    if (config.qlabPasscode && !config.qlabWorkspace) send('/connect', [config.qlabPasscode]);
     // Without this QLab doesn't reply to action commands like /start and /stop.
     send('/alwaysReply', [1]);
+    send('/workspaces');
+    let tick = 0;
     pollTimer = setInterval(() => {
-      for (const cue of config.cues) send(`/cue/${cue.number}/valuesForKeys`, [STATUS_KEYS]);
-      if (config.playhead) send('/cue/playhead/valuesForKeys', [PLAYHEAD_KEYS]);
+      if (++tick % WORKSPACE_CHECK_EVERY === 0) send('/workspaces');
+      if (!config.qlabWorkspace || workspaceId) {
+        for (const cue of config.cues) send(`/cue/${cue.number}/valuesForKeys`, [STATUS_KEYS]);
+        if (config.playhead) send('/cue/playhead/valuesForKeys', [PLAYHEAD_KEYS]);
+      }
       status.qlab = qlabState();
       if (status.qlab !== 'ok') {
         status.cues = {};
@@ -316,7 +378,15 @@ function connectQlab() {
   sock.on('data', slipDecoder((packet) => {
     try {
       const { address, args } = decodeOsc(packet);
-      if (address.startsWith('/reply/')) handleReply(address.slice('/reply'.length), JSON.parse(args[0]));
+      if (!address.startsWith('/reply/')) return;
+      const reply = JSON.parse(args[0]);
+      let replyTo = address.slice('/reply'.length);
+      // Replies to workspace-addressed messages carry the same /workspace/{id} prefix.
+      const prefixed = /^\/workspace\/([^/]+)(\/.*)$/.exec(replyTo);
+      if (prefixed) replyTo = prefixed[2];
+      // With a target workspace, ignore anything another workspace says.
+      if (workspaceId && reply.workspace_id && reply.workspace_id !== workspaceId) return;
+      handleReply(replyTo, reply);
     } catch {
       // Ignore malformed packets.
     }
@@ -327,9 +397,11 @@ function connectQlab() {
     clearInterval(pollTimer);
     if (qlabSocket === sock) console.log('QLab connection lost, retrying...');
     qlabSocket = null;
+    workspaceId = null;
     status.qlab = 'offline';
     status.cues = {};
     status.playhead = null;
+    status.workspace = { name: null, open: [] };
     for (const entries of pending.values()) {
       for (const entry of entries) {
         clearTimeout(entry.timer);
@@ -533,6 +605,7 @@ const server = http.createServer(async (req, res) => {
       fadeConfirm: config.fadeConfirm,
       playhead: config.playhead,
       spotify: config.spotify,
+      workspace: config.qlabWorkspace || null,
       cues: config.cues,
       colors: COLORS,
       // The cue editor would be overridden on the next start if cues come from the environment.
@@ -661,6 +734,7 @@ server.listen(config.port, '0.0.0.0', () => {
 
   console.log(`\nQLab remote running (QLab at ${config.qlabHost}:${config.qlabPort})`);
   console.log(`Cues: ${config.cues.map((c) => c.number + (c.label ? ` (${c.label})` : '')).join(', ')}`);
+  if (config.qlabWorkspace) console.log(`Workspace: ${config.qlabWorkspace}`);
   if (config.playhead) console.log('Playhead mode on');
   if (config.pin) console.log('PIN required');
   console.log('\n' + qrTerminal(mainUrl));

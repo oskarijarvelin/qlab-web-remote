@@ -2,6 +2,7 @@
   "port": 8080,
   "qlabHost": "127.0.0.1",
   "qlabPort": 53000,
+  "qlabWorkspace": "",
   "qlabPasscode": "",
   "pin": "",
   "fadeSeconds": 2,

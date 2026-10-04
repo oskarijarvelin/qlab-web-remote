@@ -77,6 +77,9 @@
       display: flex; flex-direction: column; gap: 2px; }
     #banner strong { font-size: 18px; letter-spacing: .06em; }
     #banner span { font-size: 13px; opacity: .9; }
+    #warn { background: #4a3a08; color: #ffe08a; border-radius: 14px; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+    #warn strong { font-size: 14px; }
+    #conn { max-width: 55vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     body:not([data-connection="ok"]) .cue:not(.err),
     body:not([data-connection="ok"]) #playhead,
     body:not([data-connection="ok"]) .stops button:not(.err) { filter: grayscale(1); opacity: .4; }
@@ -135,9 +138,9 @@
     @media (min-width: 700px) and (orientation: landscape), (min-width: 1000px) {
       body { display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 36%, 380px);
         grid-template-rows: auto auto minmax(0, 1fr) auto; column-gap: 16px; height: 100%; }
-      header, #banner, #status { grid-column: 1 / -1; }
+      header, #banner, #warn, #status { grid-column: 1 / -1; }
       header { grid-row: 1; }
-      #banner { grid-row: 2; }
+      #banner, #warn { grid-row: 2; }
       #status { grid-row: 4; }
       #main { grid-column: 1; grid-row: 3; }
       #side { grid-column: 2; grid-row: 3; overflow-y: auto; }
@@ -197,6 +200,7 @@
 <body>
   <header><h1>QLab Remote</h1><span class="right"><span id="conn">QLab</span><button id="edit-open" aria-label="Muokkaa nappeja" hidden>⚙</button></span></header>
   <div id="banner" role="alert" hidden><strong></strong><span></span></div>
+  <div id="warn" role="status" hidden><strong></strong><span></span></div>
   <main id="main">
   <section id="playhead" class="empty" hidden>
     <div class="ph-info"><span class="ph-label">SEURAAVANA</span><span class="ph-num"></span><span class="ph-name">Ei cuea valmiina</span></div>
@@ -269,6 +273,7 @@
     const statusEl = $('#status');
     const cuesEl = $('#cues');
     const bannerEl = $('#banner');
+    const warnEl = $('#warn');
     const connEl = $('#conn');
     const fadeBtn = $('#fade');
     const stopBtn = $('#stop');
@@ -436,19 +441,31 @@
       offline: ['EI YHTEYTTÄ QLABIIN', 'Onko QLab käynnissä?'],
       noreply: ['QLAB EI VASTAA', 'Onko workspace auki ja OSC sallittu?'],
       badpass: ['QLAB HYLKÄSI PASSCODEN', 'Tarkista qlabPasscode config.jsonissa.'],
+      noworkspace: ['WORKSPACE EI OLE AUKI', ''],
       denied: ['QLAB ESTI YHTEYDEN', 'Anna OSC-yhteydelle oikeudet tai aseta passcode.'],
     };
 
-    function renderConnection(connection) {
+    function renderConnection(connection, workspace) {
       document.body.dataset.connection = connection;
       const text = CONNECTION_TEXT[connection];
       bannerEl.hidden = !text;
       if (text) {
         $('strong', bannerEl).textContent = text[0];
-        $('span', bannerEl).textContent = text[1];
+        $('span', bannerEl).textContent = connection === 'noworkspace'
+          ? 'Avaa "' + config.workspace + '" QLabissa.' + (workspace?.open?.length ? ' Nyt auki: ' + workspace.open.join(', ') : '')
+          : text[1];
+      }
+      // Several workspaces open and none chosen: commands reach all of them. Warn, but keep working.
+      const open = workspace?.open || [];
+      const ambiguous = connection === 'ok' && !config?.workspace && open.length > 1;
+      warnEl.hidden = !ambiguous;
+      if (ambiguous) {
+        $('strong', warnEl).textContent = 'Auki on ' + open.length + ' workspacea: ' + open.join(', ');
+        $('span', warnEl).textContent = 'GO, FADE ja STOP menevät kaikkiin. Valitse yksi asetuksella qlabWorkspace.';
       }
       connEl.classList.toggle('on', connection === 'ok');
-      connEl.textContent = connection === 'ok' ? 'QLab yhdistetty' : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
+      connEl.textContent = connection === 'ok' ? 'QLab' + (workspace?.name ? ' · ' + workspace.name : ' yhdistetty')
+        : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
     }
 
     function renderPlayhead(p) {
@@ -459,7 +476,7 @@
 
     function render(status) {
       lastStatus = status;
-      renderConnection(status.qlab);
+      renderConnection(status.qlab, status.workspace);
       if (config.spotify) renderSpotify(status.spotify);
       if (config.playhead) renderPlayhead(status.playhead);
       for (const cue of config.cues) {
