@@ -63,6 +63,8 @@ function loadConfig() {
     playhead: false,
     spotify: true,
     spotifyFadeSeconds: 2,
+    macVolume: true,
+    backup: null,
     cues: [{ number: '1' }, { number: '2' }],
     ...fileConfig,
   };
@@ -71,6 +73,21 @@ function loadConfig() {
   if (env.QLAB_PORT) c.qlabPort = Number(env.QLAB_PORT);
   if (env.QLAB_PASSCODE) c.qlabPasscode = env.QLAB_PASSCODE;
   if (env.QLAB_WORKSPACE) c.qlabWorkspace = env.QLAB_WORKSPACE;
+  if (env.QLAB_BACKUP_HOST) c.backup = { ...(c.backup || {}), host: env.QLAB_BACKUP_HOST };
+
+  // Backup QLab: same workspace and passcode as the main one unless given separately.
+  if (c.backup) {
+    if (!c.backup.host) {
+      console.error('config: backup needs a host, e.g. "backup": { "host": "192.168.1.21" }');
+      process.exit(1);
+    }
+    c.backup = {
+      host: String(c.backup.host),
+      port: Number(c.backup.port) || 53000,
+      workspace: c.backup.workspace ?? c.qlabWorkspace,
+      passcode: c.backup.passcode ?? c.qlabPasscode,
+    };
+  }
   if (env.PIN) c.pin = env.PIN;
   if (env.FADE_SECONDS) c.fadeSeconds = Number(env.FADE_SECONDS);
   if (env.FADE_CONFIRM) c.fadeConfirm = env.FADE_CONFIRM === '1';
@@ -113,7 +130,7 @@ function saveCues(cues) {
 
   config.cues = cues;
   cueConfig = new Map(cues.map((cue) => [cue.number, cue]));
-  status.cues = {};
+  for (const q of [main, backup]) if (q) q.cues = {};
 }
 
 // Flattens QLab's nested cue lists (groups contain cues) into rows for the cue picker.
@@ -207,24 +224,22 @@ const COMMAND_TIMEOUT_MS = 1000;
 const STALE_MS = 2000;
 // Open workspaces are re-checked every this many polls (2 s), to notice one being opened or closed.
 const WORKSPACE_CHECK_EVERY = 8;
+// Main and backup may briefly disagree right after a command; only report a difference this old.
+const SYNC_GRACE_MS = 1500;
 const STATUS_KEYS = JSON.stringify(['displayName', 'isRunning', 'isPaused', 'duration', 'actionElapsed']);
 const PLAYHEAD_KEYS = JSON.stringify(['number', 'displayName', 'type']);
 // Messages addressed to QLab itself rather than to a workspace; never prefixed with /workspace/{id}.
 const APP_LEVEL = new Set(['/alwaysReply', '/workspaces', '/version']);
 
-// qlab: 'offline' (no TCP connection), 'noworkspace' (the configured workspace isn't open),
-// 'noreply' (no workspace answering), 'badpass' (wrong passcode), 'denied' (no permissions) or 'ok'.
-// workspace: the targeted workspace's name (if known) and the names of all open workspaces.
+// Pushed to every page. qlab/cues/playhead/workspace come from the QLab currently shown (the main
+// machine, or the backup if the main one stops answering). qlab is one of: 'offline' (no TCP
+// connection), 'noworkspace' (the configured workspace isn't open), 'noreply' (no workspace
+// answering), 'badpass' (wrong passcode), 'denied' (no permissions) or 'ok'.
 // lastCommand: the most recent command from any phone, so every phone can show who did what.
-const status = { qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] }, spotify: { running: false }, lastCommand: null };
-let qlabSocket = null;
-let lastStatusReply = 0;
-let lastDenied = 0;
-let badPasscode = false;
-// uniqueID of the workspace named in qlabWorkspace, once it has been found among the open ones.
-let workspaceId = null;
-// Pending command replies keyed by the OSC address that was sent (without any /workspace/{id} prefix).
-const pending = new Map();
+const status = {
+  qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] },
+  backup: null, mac: null, spotify: { running: false }, lastCommand: null,
+};
 
 class QlabError extends Error {
   constructor(message, httpStatus) {
@@ -233,188 +248,270 @@ class QlabError extends Error {
   }
 }
 
-// Without qlabWorkspace, messages go to every open workspace (QLab 5 behaviour). With it, they
-// are addressed to that one workspace by its unique ID (display names may contain spaces).
-function addressFor(address) {
-  if (!config.qlabWorkspace || APP_LEVEL.has(address)) return address;
-  return `/workspace/${workspaceId}${address}`;
-}
-
-function send(address, args) {
-  qlabSocket?.write(slipEncode(encodeOsc(addressFor(address), args)));
-}
-
-function qlabRequest(address, args) {
-  if (!qlabSocket) return Promise.reject(new QlabError('Ei yhteyttä QLabiin', 503));
-  if (config.qlabWorkspace && !workspaceId) {
-    return Promise.reject(new QlabError(`Workspace "${config.qlabWorkspace}" ei ole auki QLabissa`, 503));
-  }
-  return new Promise((resolve, reject) => {
-    const entry = { resolve, reject };
-    entry.timer = setTimeout(() => {
-      pending.get(address).splice(pending.get(address).indexOf(entry), 1);
-      reject(new QlabError('QLab ei vastannut', 504));
-    }, COMMAND_TIMEOUT_MS);
-    if (!pending.has(address)) pending.set(address, []);
-    pending.get(address).push(entry);
-    send(address, args);
-  });
-}
-
-// Matches qlabWorkspace against an open workspace's unique ID or display name ("Gala" or "Gala.qlab5").
-function findWorkspace(list) {
-  const plain = (name) => String(name || '').toLowerCase().replace(/\.qlab5$/, '');
-  const want = plain(config.qlabWorkspace);
-  return list.find((w) => plain(w.uniqueID) === want || plain(w.displayName) === want) || null;
-}
-
-function handleWorkspaces(list) {
-  status.workspace.open = list.map((w) => w.displayName);
-  if (!config.qlabWorkspace) {
-    status.workspace.name = list.length === 1 ? list[0].displayName : null;
-    return;
-  }
-  const ws = findWorkspace(list);
-  status.workspace.name = ws ? ws.displayName : null;
-  if ((ws?.uniqueID || null) === workspaceId) return;
-
-  workspaceId = ws?.uniqueID || null;
-  status.cues = {};
-  status.playhead = null;
-  badPasscode = false;
-  if (ws) {
-    log(`Workspace: ${ws.displayName}`);
-    lastStatusReply = Date.now(); // grace period for the first polls
-    if (config.qlabPasscode) send('/connect', [config.qlabPasscode]);
-  } else {
-    log(`Workspace "${config.qlabWorkspace}" is not open (open: ${status.workspace.open.join(', ') || 'none'})`);
-  }
-}
-
-function handleReply(address, reply) {
-  if (address === '/workspaces') return handleWorkspaces(Array.isArray(reply.data) ? reply.data : []);
-
-  if (address === '/connect') {
-    badPasscode = reply.status === 'badpass' || reply.data === 'badpass';
-    console.log(badPasscode ? 'QLab rejected the passcode' : 'QLab passcode accepted');
-    return;
+// One OSC/TCP connection to a QLab, with its own polled cue state.
+class QlabConnection {
+  constructor({ label, host, port, workspace, passcode }) {
+    Object.assign(this, { label, host, port, workspace, passcode });
+    this.socket = null;
+    this.pending = new Map(); // command replies keyed by the address sent (without workspace prefix)
+    this.workspaceId = null; // uniqueID of `workspace`, once found among the open ones
+    this.lastStatusReply = 0;
+    this.lastDenied = 0;
+    this.badPasscode = false;
+    this.state = 'offline';
+    this.cues = {};
+    this.playhead = null;
+    this.ws = { name: null, open: [] };
+    this.connect();
   }
 
-  if (reply.status === 'denied') lastDenied = Date.now();
-
-  if (address === '/cue/playhead/valuesForKeys') {
-    lastStatusReply = Date.now();
-    // QLab answers with an error when no cue is standing by.
-    status.playhead = reply.status === 'ok' && reply.data
-      ? { number: reply.data.number || '', name: reply.data.displayName || '', type: reply.data.type || '' }
-      : null;
-    return;
+  log(msg) {
+    log(backup ? `[${this.label}] ${msg}` : msg);
   }
 
-  const cueStatus = /^\/cue\/([^/]+)\/valuesForKeys$/.exec(address);
-  if (cueStatus) {
-    lastStatusReply = Date.now();
-    const cue = cueStatus[1];
-    const d = reply.data;
-    status.cues[cue] = reply.status === 'ok' && d
-      ? {
-          found: true,
-          name: d.displayName,
-          running: !!d.isRunning,
-          paused: !!d.isPaused,
-          duration: Number(d.duration) || 0,
-          elapsed: Number(d.actionElapsed) || 0,
+  // Without a workspace setting, messages go to every open workspace (QLab 5 behaviour). With it,
+  // they are addressed to that one workspace by its unique ID (display names may contain spaces).
+  addressFor(address) {
+    if (!this.workspace || APP_LEVEL.has(address)) return address;
+    return `/workspace/${this.workspaceId}${address}`;
+  }
+
+  send(address, args) {
+    this.socket?.write(slipEncode(encodeOsc(this.addressFor(address), args)));
+  }
+
+  request(address, args) {
+    if (!this.socket) return Promise.reject(new QlabError('Ei yhteyttä QLabiin', 503));
+    if (this.workspace && !this.workspaceId) {
+      return Promise.reject(new QlabError(`Workspace "${this.workspace}" ei ole auki QLabissa`, 503));
+    }
+    return new Promise((resolve, reject) => {
+      const entry = { resolve, reject };
+      entry.timer = setTimeout(() => {
+        this.pending.get(address).splice(this.pending.get(address).indexOf(entry), 1);
+        reject(new QlabError('QLab ei vastannut', 504));
+      }, COMMAND_TIMEOUT_MS);
+      if (!this.pending.has(address)) this.pending.set(address, []);
+      this.pending.get(address).push(entry);
+      this.send(address, args);
+    });
+  }
+
+  // Matches the workspace setting against an open workspace's unique ID or display name ("Gala" or "Gala.qlab5").
+  findWorkspace(list) {
+    const plain = (name) => String(name || '').toLowerCase().replace(/\.qlab5$/, '');
+    const want = plain(this.workspace);
+    return list.find((w) => plain(w.uniqueID) === want || plain(w.displayName) === want) || null;
+  }
+
+  handleWorkspaces(list) {
+    this.ws.open = list.map((w) => w.displayName);
+    if (!this.workspace) {
+      this.ws.name = list.length === 1 ? list[0].displayName : null;
+      return;
+    }
+    const ws = this.findWorkspace(list);
+    this.ws.name = ws ? ws.displayName : null;
+    if ((ws?.uniqueID || null) === this.workspaceId) return;
+
+    this.workspaceId = ws?.uniqueID || null;
+    this.cues = {};
+    this.playhead = null;
+    this.badPasscode = false;
+    if (ws) {
+      this.log(`Workspace: ${ws.displayName}`);
+      this.lastStatusReply = Date.now(); // grace period for the first polls
+      if (this.passcode) this.send('/connect', [this.passcode]);
+    } else {
+      this.log(`Workspace "${this.workspace}" is not open (open: ${this.ws.open.join(', ') || 'none'})`);
+    }
+  }
+
+  handleReply(address, reply) {
+    if (address === '/workspaces') return this.handleWorkspaces(Array.isArray(reply.data) ? reply.data : []);
+
+    if (address === '/connect') {
+      this.badPasscode = reply.status === 'badpass' || reply.data === 'badpass';
+      this.log(this.badPasscode ? 'QLab rejected the passcode' : 'QLab passcode accepted');
+      return;
+    }
+
+    if (reply.status === 'denied') this.lastDenied = Date.now();
+
+    if (address === '/cue/playhead/valuesForKeys') {
+      this.lastStatusReply = Date.now();
+      // QLab answers with an error when no cue is standing by.
+      this.playhead = reply.status === 'ok' && reply.data
+        ? { number: reply.data.number || '', name: reply.data.displayName || '', type: reply.data.type || '' }
+        : null;
+      return;
+    }
+
+    const cueStatus = /^\/cue\/([^/]+)\/valuesForKeys$/.exec(address);
+    if (cueStatus) {
+      this.lastStatusReply = Date.now();
+      const d = reply.data;
+      this.cues[cueStatus[1]] = reply.status === 'ok' && d
+        ? {
+            found: true,
+            name: d.displayName,
+            running: !!d.isRunning,
+            paused: !!d.isPaused,
+            duration: Number(d.duration) || 0,
+            elapsed: Number(d.actionElapsed) || 0,
+          }
+        : { found: false };
+      return;
+    }
+
+    const entry = this.pending.get(address)?.shift();
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    if (reply.status === 'ok') entry.resolve(reply);
+    else if (reply.status === 'denied') entry.reject(new QlabError('QLab esti komennon (passcode?)', 502));
+    else entry.reject(new QlabError('QLab: virhe (onko cue olemassa?)', 502));
+  }
+
+  computeState() {
+    if (!this.socket) return 'offline';
+    if (this.workspace && !this.workspaceId) return 'noworkspace';
+    if (this.badPasscode) return 'badpass';
+    if (Date.now() - this.lastDenied < STALE_MS) return 'denied';
+    return Date.now() - this.lastStatusReply < STALE_MS ? 'ok' : 'noreply';
+  }
+
+  connect() {
+    const sock = net.createConnection({ host: this.host, port: this.port });
+    let pollTimer = null;
+
+    sock.on('connect', () => {
+      this.socket = sock;
+      this.badPasscode = false;
+      this.workspaceId = null;
+      this.lastStatusReply = Date.now(); // grace period so the first poll isn't reported as unanswered
+      this.log(`Connected to QLab at ${this.host}:${this.port}`);
+      // The passcode must come before any other message to the workspace. With a workspace setting
+      // it is sent once that workspace has been found (see handleWorkspaces).
+      if (this.passcode && !this.workspace) this.send('/connect', [this.passcode]);
+      // Without this QLab doesn't reply to action commands like /start and /stop.
+      this.send('/alwaysReply', [1]);
+      this.send('/workspaces');
+      let tick = 0;
+      pollTimer = setInterval(() => {
+        if (++tick % WORKSPACE_CHECK_EVERY === 0) this.send('/workspaces');
+        if (!this.workspace || this.workspaceId) {
+          for (const cue of config.cues) this.send(`/cue/${cue.number}/valuesForKeys`, [STATUS_KEYS]);
+          if (config.playhead) this.send('/cue/playhead/valuesForKeys', [PLAYHEAD_KEYS]);
         }
-      : { found: false };
-    return;
+        this.state = this.computeState();
+        if (this.state !== 'ok') {
+          this.cues = {};
+          this.playhead = null;
+        }
+      }, POLL_MS);
+    });
+
+    sock.on('data', slipDecoder((packet) => {
+      try {
+        const { address, args } = decodeOsc(packet);
+        if (!address.startsWith('/reply/')) return;
+        const reply = JSON.parse(args[0]);
+        let replyTo = address.slice('/reply'.length);
+        // Replies to workspace-addressed messages carry the same /workspace/{id} prefix.
+        const prefixed = /^\/workspace\/([^/]+)(\/.*)$/.exec(replyTo);
+        if (prefixed) replyTo = prefixed[2];
+        // With a target workspace, ignore anything another workspace says.
+        if (this.workspaceId && reply.workspace_id && reply.workspace_id !== this.workspaceId) return;
+        this.handleReply(replyTo, reply);
+      } catch {
+        // Ignore malformed packets.
+      }
+    }));
+
+    sock.on('error', () => {});
+    sock.on('close', () => {
+      clearInterval(pollTimer);
+      if (this.socket === sock) this.log('QLab connection lost, retrying...');
+      this.socket = null;
+      this.workspaceId = null;
+      this.state = 'offline';
+      this.cues = {};
+      this.playhead = null;
+      this.ws = { name: null, open: [] };
+      for (const entries of this.pending.values()) {
+        for (const entry of entries) {
+          clearTimeout(entry.timer);
+          entry.reject(new QlabError('Yhteys QLabiin katkesi', 503));
+        }
+      }
+      this.pending.clear();
+      setTimeout(() => this.connect(), 2000);
+    });
   }
-
-  const entry = pending.get(address)?.shift();
-  if (!entry) return;
-  clearTimeout(entry.timer);
-  if (reply.status === 'ok') entry.resolve(reply);
-  else if (reply.status === 'denied') entry.reject(new QlabError('QLab esti komennon (passcode?)', 502));
-  else entry.reject(new QlabError('QLab: virhe (onko cue olemassa?)', 502));
 }
 
-function qlabState() {
-  if (!qlabSocket) return 'offline';
-  if (config.qlabWorkspace && !workspaceId) return 'noworkspace';
-  if (badPasscode) return 'badpass';
-  if (Date.now() - lastDenied < STALE_MS) return 'denied';
-  return Date.now() - lastStatusReply < STALE_MS ? 'ok' : 'noreply';
+const main = new QlabConnection({
+  label: 'pääkone', host: config.qlabHost, port: config.qlabPort, workspace: config.qlabWorkspace, passcode: config.qlabPasscode,
+});
+const backup = config.backup ? new QlabConnection({ label: 'varakone', ...config.backup }) : null;
+
+// The QLab whose state is shown: the main machine, or the backup while the main one is down.
+function activeQlab() {
+  if (backup && main.state !== 'ok' && backup.state === 'ok') return backup;
+  return main;
 }
 
-function connectQlab() {
-  const sock = net.createConnection({ host: config.qlabHost, port: config.qlabPort });
-  let pollTimer = null;
-
-  sock.on('connect', () => {
-    qlabSocket = sock;
-    badPasscode = false;
-    workspaceId = null;
-    lastStatusReply = Date.now(); // grace period so the first poll isn't reported as unanswered
-    console.log('Connected to QLab');
-    // The passcode must come before any other message to the workspace. With qlabWorkspace it is
-    // sent once that workspace has been found (see handleWorkspaces).
-    if (config.qlabPasscode && !config.qlabWorkspace) send('/connect', [config.qlabPasscode]);
-    // Without this QLab doesn't reply to action commands like /start and /stop.
-    send('/alwaysReply', [1]);
-    send('/workspaces');
-    let tick = 0;
-    pollTimer = setInterval(() => {
-      if (++tick % WORKSPACE_CHECK_EVERY === 0) send('/workspaces');
-      if (!config.qlabWorkspace || workspaceId) {
-        for (const cue of config.cues) send(`/cue/${cue.number}/valuesForKeys`, [STATUS_KEYS]);
-        if (config.playhead) send('/cue/playhead/valuesForKeys', [PLAYHEAD_KEYS]);
-      }
-      status.qlab = qlabState();
-      if (status.qlab !== 'ok') {
-        status.cues = {};
-        status.playhead = null;
-      }
-    }, POLL_MS);
-  });
-
-  sock.on('data', slipDecoder((packet) => {
-    try {
-      const { address, args } = decodeOsc(packet);
-      if (!address.startsWith('/reply/')) return;
-      const reply = JSON.parse(args[0]);
-      let replyTo = address.slice('/reply'.length);
-      // Replies to workspace-addressed messages carry the same /workspace/{id} prefix.
-      const prefixed = /^\/workspace\/([^/]+)(\/.*)$/.exec(replyTo);
-      if (prefixed) replyTo = prefixed[2];
-      // With a target workspace, ignore anything another workspace says.
-      if (workspaceId && reply.workspace_id && reply.workspace_id !== workspaceId) return;
-      handleReply(replyTo, reply);
-    } catch {
-      // Ignore malformed packets.
-    }
-  }));
-
-  sock.on('error', () => {});
-  sock.on('close', () => {
-    clearInterval(pollTimer);
-    if (qlabSocket === sock) console.log('QLab connection lost, retrying...');
-    qlabSocket = null;
-    workspaceId = null;
-    status.qlab = 'offline';
-    status.cues = {};
-    status.playhead = null;
-    status.workspace = { name: null, open: [] };
-    for (const entries of pending.values()) {
-      for (const entry of entries) {
-        clearTimeout(entry.timer);
-        entry.reject(new QlabError('Yhteys QLabiin katkesi', 503));
-      }
-    }
-    pending.clear();
-    setTimeout(connectQlab, 2000);
-  });
+// Compares what main and backup are doing, so a backup that has drifted out of step is noticed
+// before it is needed. A difference has to last SYNC_GRACE_MS to count.
+let syncMismatchSince = null;
+function checkSync() {
+  if (main.state !== 'ok' || backup.state !== 'ok') { syncMismatchSince = null; return null; }
+  const describe = (c) => (!c?.found ? 'puuttuu' : c.paused ? 'tauolla' : c.running ? 'soi' : 'ei soi');
+  let reason = null;
+  for (const cue of config.cues) {
+    const a = describe(main.cues[cue.number]);
+    const b = describe(backup.cues[cue.number]);
+    if (a !== b) { reason = `Cue ${cue.number}: pääkoneella ${a}, varakoneella ${b}`; break; }
+  }
+  if (!reason && config.playhead && (main.playhead?.number || '') !== (backup.playhead?.number || '')) {
+    reason = `Playhead: pääkoneella ${main.playhead?.number || '–'}, varakoneella ${backup.playhead?.number || '–'}`;
+  }
+  if (!reason) { syncMismatchSince = null; return null; }
+  syncMismatchSince ??= Date.now();
+  return Date.now() - syncMismatchSince >= SYNC_GRACE_MS ? reason : null;
 }
 
-connectQlab();
+function updateStatus() {
+  const q = activeQlab();
+  status.qlab = q.state;
+  status.cues = q.cues;
+  status.playhead = q.playhead;
+  status.workspace = q.ws;
+  status.backup = backup && {
+    active: q === backup, // the main machine is down and the backup is being shown
+    main: main.state,
+    backup: backup.state,
+    host: backup.host,
+    outOfSync: checkSync(),
+  };
+}
+
+// Sends a command to the main QLab and the backup at the same time. Succeeds if at least one of
+// them confirmed it; the other's failure is returned as a warning for the status line.
+async function qlabCommandAll(address, args) {
+  const targets = backup ? [main, backup] : [main];
+  const results = await Promise.allSettled(targets.map((q) => q.request(address, args)));
+  const failures = results
+    .map((r, i) => (r.status === 'rejected' ? { q: targets[i], err: r.reason } : null))
+    .filter(Boolean);
+  if (!backup) {
+    if (failures.length) throw failures[0].err;
+    return null;
+  }
+  const describe = ({ q, err }) => `${q === main ? 'Pääkone' : 'Varakone'}: ${err.message}`;
+  if (failures.length === targets.length) throw new QlabError(failures.map(describe).join(' · '), failures[0].err.httpStatus || 502);
+  return failures.length ? failures.map(describe).join(' · ') : null;
+}
 
 // --- Spotify ---
 const SPOTIFY_POLL_MS = 1000;
@@ -498,6 +595,29 @@ if (config.spotify) {
   status.spotify = null;
 }
 
+// --- Mac output volume ---
+// macOS volume of the default output device. "missing value" means the device (e.g. many audio
+// interfaces) has no software volume, so the slider is shown disabled.
+const MAC_STATUS_SCRIPT = `
+set s to get volume settings
+return (output volume of s as string) & "|" & (output muted of s as string)`;
+
+async function refreshMac() {
+  try {
+    const [volume, muted] = (await osascript(MAC_STATUS_SCRIPT)).split('|');
+    status.mac = { volume: /^\d+$/.test(volume) ? Number(volume) : null, muted: muted === 'true' };
+  } catch {
+    status.mac = null;
+  }
+}
+
+if (config.macVolume) {
+  (async function pollMac() {
+    await refreshMac();
+    setTimeout(pollMac, SPOTIFY_POLL_MS);
+  })();
+}
+
 // --- PIN ---
 // The cookie holds a hash of the PIN, so it survives server restarts and stops working when the PIN changes.
 const AUTH_COOKIE = 'qlr';
@@ -526,6 +646,7 @@ function broadcast(payload) {
   for (const res of sseClients) res.write(payload);
 }
 setInterval(() => {
+  updateStatus();
   if (sseClients.size) broadcast(`data: ${JSON.stringify(status)}\n\n`);
 }, POLL_MS);
 
@@ -549,16 +670,17 @@ function deviceOf(req) {
   return { name, id: String(req.headers['x-device-id'] || '').slice(0, 40) };
 }
 
-function recordCommand(req, text, error) {
+// warning: the command went through, but something is worth knowing (e.g. the backup didn't confirm).
+function recordCommand(req, text, error, warning) {
   const device = deviceOf(req);
-  status.lastCommand = { text, device: device.name, deviceId: device.id, at: Date.now(), ok: !error, error: error || null };
-  log(`${text} [${device.name}]${error ? ' FAILED: ' + error : ''}`);
+  status.lastCommand = { text, device: device.name, deviceId: device.id, at: Date.now(), ok: !error, error: error || null, warning: warning || null };
+  log(`${text} [${device.name}]${error ? ' FAILED: ' + error : ''}${warning ? ' WARNING: ' + warning : ''}`);
 }
 
 async function runQlabCommand(req, res, text, address, args) {
   try {
-    await qlabRequest(address, args);
-    recordCommand(req, text);
+    const warning = await qlabCommandAll(address, args);
+    recordCommand(req, text, null, warning);
     res.writeHead(204);
     res.end();
   } catch (err) {
@@ -631,6 +753,8 @@ const server = http.createServer(async (req, res) => {
       fadeConfirm: config.fadeConfirm,
       playhead: config.playhead,
       spotify: config.spotify,
+      macVolume: config.macVolume,
+      backup: !!config.backup,
       workspace: config.qlabWorkspace || null,
       cues: config.cues,
       colors: COLORS,
@@ -641,7 +765,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === 'GET' && url === '/qlab/cues') {
     try {
-      const reply = await qlabRequest('/cueLists');
+      const reply = await activeQlab().request('/cueLists');
       return sendJson(res, flattenCueLists(reply.data));
     } catch (err) {
       return sendText(res, err.httpStatus || 500, err.message);
@@ -678,7 +802,10 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  if (method === 'GET' && url === '/status') return sendJson(res, status);
+  if (method === 'GET' && url === '/status') {
+    updateStatus();
+    return sendJson(res, status);
+  }
 
   if (method === 'GET' && url === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -726,6 +853,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  const macMatch = method === 'POST' && config.macVolume && url.match(/^\/mac\/(volume\/(\d+)|mute)$/);
+  if (macMatch) {
+    const volume = macMatch[2];
+    const muted = status.mac?.muted;
+    const script = volume !== undefined
+      ? `set volume output volume ${Math.min(100, Number(volume))}`
+      : `set volume output muted ${muted ? 'false' : 'true'}`;
+    try {
+      await osascript(script);
+      // Volume changes arrive many times a second while dragging; only mute is announced.
+      if (volume === undefined) recordCommand(req, muted ? 'Mac ääni päälle' : 'Mac mykistetty');
+      refreshMac();
+      res.writeHead(204);
+      return res.end();
+    } catch (err) {
+      console.error(err.message);
+      return sendText(res, 500, 'Äänenvoimakkuuden säätö epäonnistui');
+    }
+  }
+
   const cueMatch = method === 'POST' && url.match(/^\/cue\/([^/]+)\/(pause|stop|fade)$/);
   if (cueMatch) {
     const cue = decodeURIComponent(cueMatch[1]);
@@ -767,6 +914,7 @@ server.listen(config.port, '0.0.0.0', () => {
   console.log(`\nQLab remote running (QLab at ${config.qlabHost}:${config.qlabPort})`);
   console.log(`Cues: ${config.cues.map((c) => c.number + (c.label ? ` (${c.label})` : '')).join(', ')}`);
   if (config.qlabWorkspace) console.log(`Workspace: ${config.qlabWorkspace}`);
+  if (config.backup) console.log(`Backup QLab: ${config.backup.host}:${config.backup.port}`);
   if (config.playhead) console.log('Playhead mode on');
   if (config.pin) console.log('PIN required');
   console.log('\n' + qrTerminal(mainUrl));

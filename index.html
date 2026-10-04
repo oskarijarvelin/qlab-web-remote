@@ -79,11 +79,23 @@
     #banner span { font-size: 13px; opacity: .9; }
     #warn { background: #4a3a08; color: #ffe08a; border-radius: 14px; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
     #warn strong { font-size: 14px; }
+    #backup-chip { font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 3px 7px; border-radius: 6px; background: #1f5f33; color: #c9f5d5; }
+    #backup-chip.bad { background: #6b1d18; color: #ffd2cc; }
+    #backup-chip.drift { background: #6b5208; color: #ffe08a; }
+    #warn.active-backup { background: #6b3a0a; color: #ffd0a0; }
+    #mac { background: #1a1a1a; border-radius: 16px; padding: 8px 10px 8px 14px; display: flex; align-items: center; gap: 10px; }
+    #mac .label { font-size: 13px; font-weight: 700; color: #aaa; }
+    #mac input[type=range] { flex: 1; min-width: 0; accent-color: #ddd; height: 28px; }
+    #mac .volnum { font-size: 13px; color: #888; min-width: 2.5ch; text-align: right; font-variant-numeric: tabular-nums; }
+    #mac .mute { flex: none; width: 44px; height: 40px; border-radius: 10px; background: #2a2a2a; font-size: 18px; }
+    #mac.muted .mute { background: #8a1f1f; }
+    #mac.muted input[type=range] { opacity: .4; }
+    #mac.fixed input[type=range], #mac.fixed .volnum { opacity: .35; }
     #conn { max-width: 55vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     body:not([data-connection="ok"]) .cue:not(.err),
     body:not([data-connection="ok"]) #playhead,
     body:not([data-connection="ok"]) .stops button:not(.err) { filter: grayscale(1); opacity: .4; }
-    body[data-connection="server"] #spotify { opacity: .4; }
+    body[data-connection="server"] #spotify, body[data-connection="server"] #mac { opacity: .4; }
 
     #spotify { background: #1a1a1a; border-radius: 20px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
     #spotify .top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
@@ -207,7 +219,7 @@
   </style>
 </head>
 <body>
-  <header><h1>QLab Remote</h1><span class="right"><span id="conn">QLab</span><button id="edit-open" aria-label="Muokkaa nappeja" hidden>⚙</button></span></header>
+  <header><h1>QLab Remote</h1><span class="right"><span id="backup-chip" hidden></span><span id="conn">QLab</span><button id="edit-open" aria-label="Muokkaa nappeja" hidden>⚙</button></span></header>
   <div id="banner" role="alert" hidden><strong></strong><span></span></div>
   <div id="warn" role="status" hidden><strong></strong><span></span></div>
   <main id="main">
@@ -235,7 +247,13 @@
       <button data-cmd="playpause" class="pp" aria-label="Toista/tauko">▶</button>
       <button data-cmd="next" aria-label="Seuraava">⏭</button>
     </div>
-    <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Äänenvoimakkuus"><span class="volnum"></span></label>
+    <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Spotifyn äänenvoimakkuus"><span class="volnum"></span></label>
+  </section>
+  <section id="mac" hidden>
+    <span class="label">Mac</span>
+    <input type="range" min="0" max="100" step="1" aria-label="Macin äänenvoimakkuus">
+    <span class="volnum"></span>
+    <button class="mute" aria-label="Mykistä Mac">🔊</button>
   </section>
   </aside>
   <div id="status"></div>
@@ -413,39 +431,47 @@
       }
     }));
 
-    // --- Spotify ---
-    const sp = $('#spotify');
-    const volInput = $('input[type=range]', sp);
-    let volDragging = false;
-    let volSending = false;
-    let volPending = null;
+    // A volume slider that sends changes while dragging, never more than one request in flight,
+    // and ignores the polled value while the user is touching it (so it doesn't jump back).
+    function volumeSlider(input, numEl, send) {
+      let dragging = false, sending = false, pending = null;
+      async function push(v) {
+        if (sending) { pending = v; return; }
+        sending = true;
+        await send(v);
+        sending = false;
+        if (pending !== null) { const next = pending; pending = null; push(next); }
+      }
+      input.addEventListener('input', () => { numEl.textContent = input.value; push(input.value); });
+      input.addEventListener('pointerdown', () => { dragging = true; });
+      input.addEventListener('change', () => { setTimeout(() => { dragging = false; }, 1500); });
+      return {
+        update(value) {
+          if (dragging || sending) return;
+          input.value = value;
+          numEl.textContent = value;
+        },
+      };
+    }
 
-    async function spotify(cmd) {
+    // POST without a button to animate (sliders, Spotify, Mac); only a lost connection is shown here,
+    // anything else the server reports in the shared status line.
+    async function post(url, what) {
       try {
-        const res = await fetch('/spotify/' + cmd, { method: 'POST', headers: deviceHeaders() });
+        const res = await fetch(url, { method: 'POST', headers: deviceHeaders() });
         if (res.status === 401) return showLogin();
         if (!res.ok) throw new Error(await res.text());
       } catch (e) {
-        if (e.message === 'Failed to fetch') showLocalStatus('Spotify-komento epäonnistui: ei yhteyttä palvelimeen', true);
+        showLocalStatus(what + ' epäonnistui: ' + (e.message === 'Failed to fetch' ? 'ei yhteyttä palvelimeen' : e.message), true);
       }
     }
 
-    sp.querySelectorAll('.controls button').forEach(b => b.addEventListener('click', () => spotify(b.dataset.cmd)));
+    // --- Spotify ---
+    const sp = $('#spotify');
 
-    // Send volume changes while dragging, but never more than one request in flight.
-    async function sendVolume(v) {
-      if (volSending) { volPending = v; return; }
-      volSending = true;
-      await spotify('volume/' + v);
-      volSending = false;
-      if (volPending !== null) { const next = volPending; volPending = null; sendVolume(next); }
-    }
-    volInput.addEventListener('input', () => {
-      $('.volnum', sp).textContent = volInput.value;
-      sendVolume(volInput.value);
-    });
-    volInput.addEventListener('pointerdown', () => { volDragging = true; });
-    volInput.addEventListener('change', () => { setTimeout(() => { volDragging = false; }, 1500); });
+    const spotify = cmd => post('/spotify/' + cmd, 'Spotify-komento');
+    sp.querySelectorAll('.controls button').forEach(b => b.addEventListener('click', () => spotify(b.dataset.cmd)));
+    const spotifyVolume = volumeSlider($('input[type=range]', sp), $('.volnum', sp), v => spotify('volume/' + v));
 
     function renderSpotify(s) {
       sp.classList.toggle('off', !s || !s.running);
@@ -462,10 +488,24 @@
       $('.time', sp).textContent = s.duration ? '−' + fmt(s.duration - s.position) + ' / ' + fmt(s.duration) : '';
       $('.progress div', sp).style.width = s.duration ? Math.min(100, s.position / s.duration * 100) + '%' : 0;
       $('.pp', sp).textContent = s.state === 'playing' ? '⏸' : '▶';
-      if (!volDragging && !volSending) {
-        volInput.value = s.volume;
-        $('.volnum', sp).textContent = s.volume;
-      }
+      spotifyVolume.update(s.volume);
+    }
+
+    // --- Mac output volume ---
+    const macEl = $('#mac');
+    const macVolume = volumeSlider($('input[type=range]', macEl), $('.volnum', macEl), v => post('/mac/volume/' + v, 'Äänenvoimakkuuden säätö'));
+    $('.mute', macEl).addEventListener('click', () => post('/mac/mute', 'Mykistys'));
+
+    function renderMac(m) {
+      // volume null: the output device has no software volume (e.g. an audio interface).
+      const fixed = !m || m.volume === null;
+      macEl.classList.toggle('fixed', fixed);
+      macEl.classList.toggle('muted', !!m?.muted);
+      $('input[type=range]', macEl).disabled = fixed;
+      $('.mute', macEl).textContent = m?.muted ? '🔇' : '🔊';
+      $('.mute', macEl).ariaLabel = m?.muted ? 'Poista mykistys' : 'Mykistä Mac';
+      if (fixed) $('.volnum', macEl).textContent = '–';
+      else macVolume.update(m.volume);
     }
 
     // --- Status rendering ---
@@ -479,6 +519,39 @@
       denied: ['QLAB ESTI YHTEYDEN', 'Anna OSC-yhteydelle oikeudet tai aseta passcode.'],
     };
 
+    // The yellow/orange notice under the header: things that don't stop the remote from working.
+    let workspaceWarning = null;
+    let backupWarning = null;
+    function renderWarning() {
+      const w = backupWarning || workspaceWarning;
+      warnEl.hidden = !w;
+      warnEl.classList.toggle('active-backup', !!w?.[2]);
+      if (w) {
+        $('strong', warnEl).textContent = w[0];
+        $('span', warnEl).textContent = w[1];
+      }
+    }
+
+    const QLAB_STATE_TEXT = { offline: 'ei yhteyttä', noworkspace: 'workspace ei auki', noreply: 'ei vastaa', badpass: 'väärä passcode', denied: 'ei oikeuksia', ok: 'ok' };
+
+    // Main + backup: header chip shows the backup's health; the notice explains any problem.
+    function renderBackup(b) {
+      const chip = $('#backup-chip');
+      chip.hidden = !b;
+      backupWarning = null;
+      if (b) {
+        const drift = !!b.outOfSync;
+        chip.textContent = b.backup !== 'ok' ? 'VARA ✕' : drift ? 'VARA ≠' : 'VARA ✓';
+        chip.className = b.backup !== 'ok' ? 'bad' : drift ? 'drift' : '';
+        chip.title = 'Varakone ' + b.host + ': ' + QLAB_STATE_TEXT[b.backup];
+        if (b.active) connEl.textContent = 'QLab · varakone';
+        if (b.active) backupWarning = ['PÄÄKONE EI VASTAA – näytetään varakone', 'Pääkone: ' + QLAB_STATE_TEXT[b.main] + '. Komennot menevät edelleen molempiin.', true];
+        else if (b.backup !== 'ok' && b.main === 'ok') backupWarning = ['Varakone: ' + QLAB_STATE_TEXT[b.backup], 'Komennot menevät vain pääkoneelle (' + b.host + ').'];
+        else if (drift) backupWarning = ['Varakone ei ole samassa tilassa', b.outOfSync];
+      }
+      renderWarning();
+    }
+
     function renderConnection(connection, workspace) {
       document.body.dataset.connection = connection;
       const text = CONNECTION_TEXT[connection];
@@ -491,12 +564,10 @@
       }
       // Several workspaces open and none chosen: commands reach all of them. Warn, but keep working.
       const open = workspace?.open || [];
-      const ambiguous = connection === 'ok' && !config?.workspace && open.length > 1;
-      warnEl.hidden = !ambiguous;
-      if (ambiguous) {
-        $('strong', warnEl).textContent = 'Auki on ' + open.length + ' workspacea: ' + open.join(', ');
-        $('span', warnEl).textContent = 'GO, FADE ja STOP menevät kaikkiin. Valitse yksi asetuksella qlabWorkspace.';
-      }
+      workspaceWarning = connection === 'ok' && !config?.workspace && open.length > 1
+        ? ['Auki on ' + open.length + ' workspacea: ' + open.join(', '), 'GO, FADE ja STOP menevät kaikkiin. Valitse yksi asetuksella qlabWorkspace.']
+        : null;
+      renderWarning();
       connEl.classList.toggle('on', connection === 'ok');
       connEl.textContent = connection === 'ok' ? 'QLab' + (workspace?.name ? ' · ' + workspace.name : ' yhdistetty')
         : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
@@ -525,9 +596,9 @@
       statusEl.replaceChildren(
         (c.ok ? '' : '✕ ') + c.text + ' — ',
         el('span', { className: 'who', textContent: mine ? 'sinä' : c.device }),
-        ' · ' + new Date(c.at).toLocaleTimeString('fi-FI') + (c.ok ? '' : ': ' + c.error));
+        ' · ' + new Date(c.at).toLocaleTimeString('fi-FI') + (c.ok ? '' : ': ' + c.error) + (c.warning ? ' ⚠ ' + c.warning : ''));
       statusEl.title = statusEl.textContent;
-      statusEl.classList.toggle('fail', !c.ok);
+      statusEl.classList.toggle('fail', !c.ok || !!c.warning);
       statusEl.classList.remove('fresh');
       if (!mine && !firstRender) { void statusEl.offsetWidth; statusEl.classList.add('fresh'); }
     }
@@ -537,6 +608,8 @@
       renderLastCommand(status.lastCommand);
       renderConnection(status.qlab, status.workspace);
       if (config.spotify) renderSpotify(status.spotify);
+      if (config.macVolume) renderMac(status.mac);
+      if (config.backup) renderBackup(status.backup);
       if (config.playhead) renderPlayhead(status.playhead);
       for (const cue of config.cues) {
         const btn = cueButtons[cue.number];
@@ -565,7 +638,7 @@
     let watchdog = null;
     function resetWatchdog() {
       clearTimeout(watchdog);
-      watchdog = setTimeout(() => render({ qlab: 'server', cues: {}, playhead: null, spotify: null }), STATUS_TIMEOUT_MS);
+      watchdog = setTimeout(() => render({ qlab: 'server', cues: {}, playhead: null, spotify: null, mac: null, backup: null }), STATUS_TIMEOUT_MS);
     }
 
     function listen() {
@@ -617,6 +690,7 @@
       }));
 
       sp.hidden = !config.spotify;
+      macEl.hidden = !config.macVolume;
       $('#edit-open').hidden = false;
       $('.ed-cues', editorEl).hidden = !config.cuesEditable;
 

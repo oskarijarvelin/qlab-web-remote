@@ -13,6 +13,8 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 - **STOP** pysäyttää kaikki cuet heti. Vaatii tuplanapautuksen vahinkopainallusten välttämiseksi.
 - **Spotify**: soiva kappale ja edistyminen, edellinen / toista-tauko / seuraava sekä äänenvoimakkuus.
 - **Yhteyskatko näkyy:** jos puhelin ei saa yhteyttä palvelimeen tai palvelin QLabiin, näytön yläreunaan tulee punainen ilmoitus ja QLab-napit harmaantuvat.
+- **Macin äänenvoimakkuus:** liukusäädin ja mykistys Macin oletusäänilaitteelle.
+- **Pää- ja varakone:** jokainen komento lähtee kahteen QLabiin yhtä aikaa. Sivu näyttää varakoneen tilan, varoittaa jos koneet eivät ole samassa tilassa ja vaihtaa varakoneen näkymään, jos pääkone lakkaa vastaamasta.
 - **Useampi puhelin:** kaikki näkevät saman tilan, ja alareunan tilarivi kertoo kaikille viimeisimmän komennon, kuka sen lähetti ja milloin (esim. "GO 1 · Intro — Valomiehen Android · 12.37.30"). Toisen puhelimen komento välähtää sinisenä. Laitteelle voi antaa nimen ⚙-paneelissa. Ilman nimeä näytetään laitteen tyyppi ja IP-osoitteen loppu, esim. "iPhone (.42)".
 - **Valinnainen PIN** jaettuihin verkkoihin ja tuki QLabin **passcodelle**.
 - **Napit valitaan puhelimella:** ⚙-paneelissa on editori, jossa cuet lisätään suoraan QLabin cue-listasta ja niille annetaan teksti, väri ja Spotify-feidi. Muutokset tallentuvat `config.json`:iin ja päivittyvät kaikkiin avoimiin puhelimiin.
@@ -80,6 +82,8 @@ Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.exa
 | `fadeConfirm` | `false` | `true` = FADE vaatii tuplanapautuksen kuten STOP |
 | `spotify` | `true` | `false` = piilota Spotify-osio |
 | `spotifyFadeSeconds` | `2` | Spotify-feidin pituus "musiikki alas" -cueissa |
+| `macVolume` | `true` | `false` = piilota Macin äänenvoimakkuuden säädin |
+| `backup` | (ei) | Varakoneen QLab, esim. `{ "host": "192.168.1.21" }`. Valinnaiset `port` (oletus 53000), `workspace` ja `passcode` (oletuksena samat kuin pääkoneella). |
 | `pin` | (ei) | Sivu kysyy tämän PIN-koodin kerran per laite |
 | `qlabWorkspace` | (ei) | Ohjattavan workspacen nimi (esim. `Gaala` tai `Gaala.qlab5`) tai tunnus. Ilman tätä komennot menevät kaikkiin avoimiin workspaceihin. |
 | `qlabPasscode` | (ei) | QLab-workspacen OSC-passcode |
@@ -87,12 +91,27 @@ Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.exa
 | `qlabHost` | `127.0.0.1` | QLab-koneen osoite |
 | `qlabPort` | `53000` | QLabin OSC-portti |
 
-Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_WORKSPACE`, `QLAB_PASSCODE`, `PORT`, `QLAB_HOST`, `QLAB_PORT`.
+Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_WORKSPACE`, `QLAB_PASSCODE`, `QLAB_BACKUP_HOST`, `PORT`, `QLAB_HOST`, `QLAB_PORT`.
 
 ### Useampi workspace tai QLab
 
 - **Monta workspacea auki samassa QLabissa:** ilman `qlabWorkspace`-asetusta QLab 5 välittää komennot kaikkiin avoimiin workspaceihin. Esimerkiksi GO cue 1 käynnistää cuen 1 jokaisessa workspacessa, jossa sellainen on. Sivu varoittaa tästä keltaisella ilmoituksella. Valitse ohjattava workspace asetuksella `qlabWorkspace`, jolloin muut workspacet eivät saa komentoja. Jos valittu workspace ei ole auki, sivu näyttää punaisen ilmoituksen eikä lähetä komentoja.
-- **QLab muilla koneilla:** palvelin ohjaa vain osoitteessa `qlabHost` olevaa QLabia (oletuksena tämä Mac). Muut koneet verkossa eivät vaikuta siihen. Jos koneita on useampi, aja jokaisella omaa palvelinta.
+- **QLab muilla koneilla:** palvelin ohjaa osoitteessa `qlabHost` olevaa QLabia (oletuksena tämä Mac) ja `backup`-asetuksella lisäksi varakonetta. Muut koneet verkossa eivät vaikuta siihen.
+
+### Pää- ja varakone
+
+Varakoneelle ei tarvita omaa palvelinta: riittää, että sillä on sama workspace auki ja OSC sallittu (Workspace Settings → Network). Lisää pääkoneen `config.json`:iin varakoneen osoite:
+
+```json
+{ "qlabWorkspace": "Gaala", "backup": { "host": "192.168.1.21" } }
+```
+
+- **Komennot** (GO, FADE, STOP, playhead ja cuekohtaiset) lähtevät molempiin koneisiin yhtä aikaa. Komento onnistuu, jos ainakin toinen kone kuittaa sen. Toisen koneen epäonnistuminen näkyy tilarivillä ⚠-varoituksena.
+- **Tila** näytetään pääkoneelta. Yläkulman merkki kertoo varakoneen tilan: **VARA ✓** (kunnossa), **VARA ≠** (ei samassa tilassa) tai **VARA ✕** (ei yhteyttä).
+- **Synkronointivahti:** jos jokin cue soi vain toisella koneella tai playhead on eri kohdassa yli 1,5 sekuntia, sivu varoittaa ja kertoo eron.
+- **Jos pääkone lakkaa vastaamasta,** sivu näyttää varakoneen tilan oranssilla ilmoituksella. Komennot menevät edelleen molempiin, joten pääkone jatkaa samasta kohdasta, jos se palaa.
+- **Spotify ja Macin äänenvoimakkuus** ohjaavat vain sitä Macia, jolla palvelin pyörii.
+- **Palvelimen sijainti:** jos palvelinta ajava kone kaatuu, etäohjain lakkaa toimimasta. Palvelimen voi ajaa myös varakoneella (`qlabHost` = pääkoneen IP, `backup.host` = `127.0.0.1`) tai kolmannella koneella.
 
 ## Miten se toimii
 
@@ -101,7 +120,8 @@ Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`
 - Jos `qlabPasscode` on asetettu, palvelin lähettää ensin `/connect {passcode}` (valittuun workspaceen, kun se on löytynyt).
 - Komennot (`/cue/{n}/start`, `/cue/{n}/togglePause`, `/cue/{n}/stop`, `/cue/{n}/panicInTime`, `/go`, `/playhead/next`, `/playhead/previous`, `/panicInTime`, `/stop`) odottavat QLabin vastausta enintään sekunnin ennen kuin puhelimelle vastataan.
 - Cuejen ja playheadin tila kysytään (`/cue/{n}/valuesForKeys`, `/cue/playhead/valuesForKeys`) neljä kertaa sekunnissa ja välitetään sivulle Server-Sent Events -yhteydellä. Jos vastauksia ei tule kahteen sekuntiin, sivu näyttää "QLab ei vastaa".
-- Spotifyta ohjataan ja sen tila luetaan AppleScriptillä (`osascript`) kerran sekunnissa. "Musiikki alas" laskee äänenvoimakkuuden nollaan, pysäyttää toiston ja palauttaa äänenvoimakkuuden ennalleen.
+- Spotifyta ohjataan ja sen tila luetaan AppleScriptillä (`osascript`) kerran sekunnissa.
+- Macin äänenvoimakkuus luetaan ja asetetaan AppleScriptillä (`get volume settings`, `set volume output volume`). Säädin koskee macOS:n oletusäänilaitetta. Jos QLab soittaa äänikorttiin, jossa ei ole ohjelmallista äänenvoimakkuutta, säädin on harmaana eikä vaikuta QLabiin. "Musiikki alas" laskee äänenvoimakkuuden nollaan, pysäyttää toiston ja palauttaa äänenvoimakkuuden ennalleen.
 - Editorin cue-lista haetaan QLabilta komennolla `/cueLists`. Napeiksi voi valita vain cueja, joilla on numero, koska komennot osoitetaan numerolla.
 - Koodi on neljässä tiedostossa: [`server.js`](server.js) (palvelin), [`index.html`](index.html) (sivu), [`qr.js`](qr.js) (QR-koodi terminaaliin) ja [`icon.js`](icon.js) (Koti-valikon kuvake PNG:nä).
 

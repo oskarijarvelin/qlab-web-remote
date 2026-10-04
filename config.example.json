@@ -10,6 +10,8 @@
   "playhead": false,
   "spotify": true,
   "spotifyFadeSeconds": 2,
+  "macVolume": true,
+  "backup": null,
   "cues": [
     { "number": "1", "label": "Intro", "color": "green", "spotifyFadeOut": true },
     { "number": "2", "label": "Palkinnot", "color": "blue" }
