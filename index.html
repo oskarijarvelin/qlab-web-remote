@@ -9,7 +9,8 @@
   <style>
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { margin: 0; height: 100%; background: #111; color: #eee;
-      font-family: -apple-system, system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+      font-family: -apple-system, system-ui, sans-serif; user-select: none; -webkit-user-select: none;
+      -webkit-touch-callout: none; }
     body { display: flex; flex-direction: column; padding: 16px;
       padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: max(16px, env(safe-area-inset-bottom)); gap: 16px; }
     header { display: flex; justify-content: space-between; align-items: center; }
@@ -17,44 +18,64 @@
     #conn { font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; }
     #conn::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #b3261e; }
     #conn.on::before { background: #2fbf5a; }
-    #cues { flex: 1; display: flex; flex-direction: column; gap: 16px; }
+    [hidden] { display: none !important; }
+
     button { flex: 1; border: 0; border-radius: 20px; background: #1f7a3a; color: #fff;
       font-size: 22px; font-weight: 700; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 4px; touch-action: manipulation;
-      transition: transform .08s, background .15s; }
-    button .num { font-size: 64px; line-height: 1; }
-    .cue { position: relative; overflow: hidden; }
+      transition: transform .08s, background .15s, filter .15s; font-family: inherit; }
+    button:active { transform: scale(.97); filter: brightness(1.2); }
+    button.ok { background: #2fbf5a; }
+    button.err { background: #b3261e; }
+    button.pending { animation: pending .6s ease-in-out infinite alternate; }
+    @keyframes pending { to { opacity: .55; } }
+
+    #cues { flex: 1; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+    .cue { position: relative; overflow: hidden; background: var(--bg, #1f7a3a); min-height: 0; }
+    .cue .go { font-size: 22px; }
+    .cue .num { font-size: 64px; line-height: 1; max-width: 92%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cue.labelled .go { font-size: 14px; letter-spacing: .1em; opacity: .8; }
+    .cue.labelled .num { font-size: 40px; }
     .cue .name { font-size: 15px; font-weight: 500; opacity: .85; max-width: 90%;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .cue .info { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; opacity: .9; min-height: 1.2em; }
     .cue .state { display: inline-block; padding: 2px 8px; border-radius: 6px; margin-right: 6px;
       font-size: 11px; letter-spacing: .08em; background: rgba(0,0,0,.25); }
-    .cue.running .state { background: #fff; color: #1f7a3a; }
+    .cue.running .state { background: #fff; color: #111; }
     .cue.paused .state { background: #f2b705; color: #111; }
     .cue .bar { position: absolute; left: 0; bottom: 0; height: 6px; width: 0; background: rgba(255,255,255,.85); }
+    .cue .badge { position: absolute; top: 10px; right: 12px; font-size: 11px; font-weight: 600;
+      padding: 3px 7px; border-radius: 6px; background: rgba(0,0,0,.3); color: #1db954; }
     .cue.running { box-shadow: inset 0 0 0 3px #fff; }
-    button:active { transform: scale(.97); background: #2a9a4c; }
-    button.ok { background: #2fbf5a; }
-    button.err { background: #b3261e; }
+    .cue.paused { box-shadow: inset 0 0 0 3px #f2b705; }
+
+    #playhead { background: #1a1a1a; border-radius: 20px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+    #playhead.solo { flex: 1; }
+    #playhead .ph-info { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    #playhead .ph-label { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #888; flex: none; }
+    #playhead .ph-num { font-size: 22px; font-weight: 800; flex: none; }
+    #playhead .ph-name { font-size: 16px; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #playhead .ph-controls { display: flex; gap: 10px; flex: 1; min-height: 72px; }
+    #playhead .ph-controls button { background: #2a2a2a; font-size: 24px; flex: 0 0 72px; }
+    #playhead .ph-controls .ph-go { flex: 1; background: #1f7a3a; font-size: 34px; letter-spacing: .1em; }
+    #playhead.empty .ph-go { opacity: .4; }
+
     .stops { flex: 0 0 96px; display: flex; gap: 16px; }
+    .stops small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
     #fade { background: #6b4a12; font-size: 28px; letter-spacing: .1em; }
-    #fade small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
-    #fade:active { background: #8a6018; }
     #fade.ok { background: #d9a020; }
     #stop { background: #5a1a17; font-size: 28px; letter-spacing: .1em; }
-    #stop small { font-size: 12px; font-weight: 500; letter-spacing: 0; opacity: .7; }
-    #stop:active { background: #7a2420; }
     #stop.armed, #fade.armed { background: #d9342b; }
-    button.pending { animation: pending .6s ease-in-out infinite alternate; }
-    @keyframes pending { to { opacity: .55; } }
+
     #banner { background: #b3261e; color: #fff; border-radius: 14px; padding: 12px 16px; text-align: center;
       display: flex; flex-direction: column; gap: 2px; }
-    #banner[hidden] { display: none; }
     #banner strong { font-size: 18px; letter-spacing: .06em; }
     #banner span { font-size: 13px; opacity: .9; }
     body:not([data-connection="ok"]) .cue:not(.err),
+    body:not([data-connection="ok"]) #playhead,
     body:not([data-connection="ok"]) .stops button:not(.err) { filter: grayscale(1); opacity: .4; }
     body[data-connection="server"] #spotify { opacity: .4; }
+
     #spotify { background: #1a1a1a; border-radius: 20px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
     #spotify .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
     #spotify .label { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: #1db954; }
@@ -65,14 +86,33 @@
     #spotify .progress div { height: 100%; width: 0; background: #1db954; }
     #spotify .controls { display: flex; gap: 10px; }
     #spotify .controls button { flex: 1; height: 56px; border-radius: 14px; background: #2a2a2a; font-size: 24px; }
-    #spotify .controls button:active { background: #3a3a3a; }
     #spotify .controls .pp { background: #1db954; color: #111; }
-    #spotify .controls .pp:active { background: #23d160; }
     #spotify .vol { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #888; }
     #spotify input[type=range] { flex: 1; accent-color: #1db954; height: 28px; }
     #spotify.off .controls, #spotify.off .vol, #spotify.off .progress { opacity: .35; }
+
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; z-index: 10; }
+    #sheet { align-items: flex-end; }
+    #sheet .panel { width: 100%; background: #1c1c1c; border-radius: 20px 20px 0 0; display: flex; flex-direction: column; gap: 10px;
+      padding: 18px 16px; padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+    #sheet h2 { margin: 0 0 4px; font-size: 15px; color: #aaa; font-weight: 600; text-align: center;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #sheet button { flex: none; height: 60px; border-radius: 14px; font-size: 18px; }
+    #sheet [data-act="pause"] { background: #8a6b0a; }
+    #sheet [data-act="fade"] { background: #6b4a12; }
+    #sheet [data-act="stop"] { background: #5a1a17; }
+    #sheet .cancel { background: #2a2a2a; }
+    #login { align-items: center; justify-content: center; background: #111; }
+    #login form { display: flex; flex-direction: column; gap: 12px; width: min(320px, 100%); padding: 16px; }
+    #login h2 { margin: 0; font-size: 18px; text-align: center; }
+    #login input { font-size: 28px; text-align: center; letter-spacing: .3em; padding: 14px; border-radius: 14px;
+      border: 1px solid #333; background: #1a1a1a; color: #fff; user-select: text; -webkit-user-select: text; }
+    #login button { flex: none; height: 60px; font-size: 18px; }
+    #login .err { color: #ff6b61; text-align: center; min-height: 1.2em; font-size: 14px; }
+
     @media (max-height: 740px) {
-      button .num { font-size: 44px; }
+      .cue .num { font-size: 44px; }
+      .cue.labelled .num { font-size: 30px; }
       .stops { flex-basis: 72px; }
     }
     #status { text-align: center; font-size: 14px; color: #888; min-height: 1.2em; }
@@ -81,12 +121,20 @@
 <body>
   <header><h1>QLab Remote</h1><span id="conn">QLab</span></header>
   <div id="banner" role="alert" hidden><strong></strong><span></span></div>
+  <section id="playhead" class="empty" hidden>
+    <div class="ph-info"><span class="ph-label">SEURAAVANA</span><span class="ph-num"></span><span class="ph-name">Ei cuea valmiina</span></div>
+    <div class="ph-controls">
+      <button data-ph="previous" aria-label="Edellinen cue">⏮</button>
+      <button data-ph="go" class="ph-go">GO</button>
+      <button data-ph="next" aria-label="Seuraava cue">⏭</button>
+    </div>
+  </section>
   <div id="cues"></div>
   <div class="stops">
     <button id="fade"><span>FADE</span><small>2 s</small></button>
     <button id="stop"><span>STOP</span><small>tuplanapautus</small></button>
   </div>
-  <section id="spotify" class="off">
+  <section id="spotify" class="off" hidden>
     <div class="top"><span class="label">SPOTIFY</span><span class="time"></span></div>
     <div class="track">Spotify ei ole käynnissä</div>
     <div class="artist"></div>
@@ -99,14 +147,39 @@
     <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Äänenvoimakkuus"><span class="volnum"></span></label>
   </section>
   <div id="status"></div>
+
+  <div id="sheet" class="overlay" hidden>
+    <div class="panel">
+      <h2></h2>
+      <button data-act="pause">Tauko / jatka</button>
+      <button data-act="fade">Feidaa</button>
+      <button data-act="stop">Pysäytä</button>
+      <button class="cancel">Peruuta</button>
+    </div>
+  </div>
+
+  <div id="login" class="overlay" hidden>
+    <form>
+      <h2>QLab Remote</h2>
+      <input type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN" aria-label="PIN">
+      <button type="submit">Kirjaudu</button>
+      <div class="err"></div>
+    </form>
+  </div>
+
   <script>
-    const statusEl = document.getElementById('status');
-    const cuesEl = document.getElementById('cues');
-    const bannerEl = document.getElementById('banner');
-    const connEl = document.getElementById('conn');
-    const fadeBtn = document.getElementById('fade');
-    const stopBtn = document.getElementById('stop');
+    const $ = (sel, root = document) => root.querySelector(sel);
+    const statusEl = $('#status');
+    const cuesEl = $('#cues');
+    const bannerEl = $('#banner');
+    const connEl = $('#conn');
+    const fadeBtn = $('#fade');
+    const stopBtn = $('#stop');
+    const playheadEl = $('#playhead');
+    const sheetEl = $('#sheet');
     const cueButtons = {};
+    let config = null;
+    let lastStatus = null;
 
     const now = () => new Date().toLocaleTimeString('fi-FI');
 
@@ -118,22 +191,27 @@
     // Sends a QLab command. The server only answers once QLab has confirmed it, so the button
     // stays in a "pending" state until then and turns green (ok) or red (error).
     async function qlabCommand(url, btn, label, vibration) {
-      if (btn.classList.contains('pending')) return;
+      if (btn.classList.contains('pending')) return false;
       btn.classList.remove('ok', 'err');
       btn.classList.add('pending');
+      let ok = false;
       try {
         const res = await fetch(url, { method: 'POST' });
+        if (res.status === 401) { showLogin(); return false; }
         if (!res.ok) throw new Error(await res.text() || res.statusText);
         btn.classList.add('ok');
         statusEl.textContent = label + ' – ' + now();
         if (navigator.vibrate) navigator.vibrate(vibration);
+        ok = true;
       } catch (e) {
         btn.classList.add('err');
         statusEl.textContent = label + ' epäonnistui: ' + (e.message === 'Failed to fetch' ? 'ei yhteyttä palvelimeen' : e.message);
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      } finally {
+        btn.classList.remove('pending');
+        setTimeout(() => btn.classList.remove('ok', 'err'), btn.classList.contains('err') ? 1500 : 400);
       }
-      btn.classList.remove('pending');
-      setTimeout(() => btn.classList.remove('ok', 'err'), btn.classList.contains('err') ? 1500 : 400);
+      return ok;
     }
 
     // Runs action only on the second tap within DOUBLE_TAP_MS, so the button can't be hit by accident.
@@ -153,17 +231,52 @@
       });
     }
 
-    doubleTap(stopBtn, () => qlabCommand('/stop', stopBtn, 'STOP', [30, 50, 30]));
+    // Calls onLongPress after LONG_PRESS_MS of holding, and swallows the click that follows,
+    // so a long press on a cue never also fires its GO.
+    const LONG_PRESS_MS = 500;
+    function longPress(btn, onLongPress) {
+      let timer = null;
+      let fired = false;
+      const cancel = () => { clearTimeout(timer); timer = null; };
+      btn.addEventListener('pointerdown', () => {
+        fired = false;
+        timer = setTimeout(() => {
+          fired = true;
+          if (navigator.vibrate) navigator.vibrate(15);
+          onLongPress();
+        }, LONG_PRESS_MS);
+      });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, cancel));
+      btn.addEventListener('contextmenu', e => e.preventDefault());
+      btn.addEventListener('click', e => {
+        if (fired) { e.stopImmediatePropagation(); fired = false; }
+      }, true);
+    }
 
-    fetch('/config').then(r => r.json()).then(c => {
-      const fade = () => qlabCommand('/fade', fadeBtn, 'FADE', 30);
-      fadeBtn.querySelector('small').textContent = c.fadeSeconds + ' s' + (c.fadeConfirm ? ' · tuplanapautus' : '');
-      if (c.fadeConfirm) doubleTap(fadeBtn, fade);
-      else fadeBtn.addEventListener('click', fade);
-    }).catch(() => {});
+    // --- Per-cue menu ---
+    let sheetCue = null;
+    function openSheet(cue) {
+      sheetCue = cue;
+      const s = lastStatus?.cues?.[cue.number];
+      $('h2', sheetEl).textContent = 'Cue ' + cue.number + (cue.label ? ' · ' + cue.label : '') + (s?.name ? ' – ' + s.name : '');
+      $('[data-act="fade"]', sheetEl).textContent = 'Feidaa (' + config.fadeSeconds + ' s)';
+      sheetEl.hidden = false;
+    }
+    function closeSheet() { sheetEl.hidden = true; sheetCue = null; }
+    sheetEl.addEventListener('click', e => { if (e.target === sheetEl) closeSheet(); });
+    $('.cancel', sheetEl).addEventListener('click', closeSheet);
+    const SHEET_LABELS = { pause: 'Tauko/jatka', fade: 'FADE', stop: 'STOP' };
+    sheetEl.querySelectorAll('[data-act]').forEach(btn => btn.addEventListener('click', async () => {
+      const cue = sheetCue;
+      const act = btn.dataset.act;
+      if (await qlabCommand('/cue/' + encodeURIComponent(cue.number) + '/' + act, btn, SHEET_LABELS[act] + ' cue ' + cue.number, 30)) {
+        setTimeout(closeSheet, 300);
+      }
+    }));
 
-    const sp = document.getElementById('spotify');
-    const volInput = sp.querySelector('input[type=range]');
+    // --- Spotify ---
+    const sp = $('#spotify');
+    const volInput = $('input[type=range]', sp);
     let volDragging = false;
     let volSending = false;
     let volPending = null;
@@ -171,6 +284,7 @@
     async function spotify(cmd) {
       try {
         const res = await fetch('/spotify/' + cmd, { method: 'POST' });
+        if (res.status === 401) return showLogin();
         if (!res.ok) throw new Error(await res.text());
       } catch (e) {
         statusEl.textContent = 'Virhe: ' + e.message;
@@ -188,7 +302,7 @@
       if (volPending !== null) { const next = volPending; volPending = null; sendVolume(next); }
     }
     volInput.addEventListener('input', () => {
-      sp.querySelector('.volnum').textContent = volInput.value;
+      $('.volnum', sp).textContent = volInput.value;
       sendVolume(volInput.value);
     });
     volInput.addEventListener('pointerdown', () => { volDragging = true; });
@@ -197,29 +311,32 @@
     function renderSpotify(s) {
       sp.classList.toggle('off', !s || !s.running);
       if (!s || !s.running) {
-        sp.querySelector('.track').textContent = 'Spotify ei ole käynnissä';
-        sp.querySelector('.artist').textContent = '';
-        sp.querySelector('.time').textContent = '';
-        sp.querySelector('.progress div').style.width = 0;
-        sp.querySelector('.pp').textContent = '▶';
+        $('.track', sp).textContent = 'Spotify ei ole käynnissä';
+        $('.artist', sp).textContent = '';
+        $('.time', sp).textContent = '';
+        $('.progress div', sp).style.width = 0;
+        $('.pp', sp).textContent = '▶';
         return;
       }
-      sp.querySelector('.track').textContent = s.name || '–';
-      sp.querySelector('.artist').textContent = s.artist || '';
-      sp.querySelector('.time').textContent = s.duration ? '−' + fmt(s.duration - s.position) + ' / ' + fmt(s.duration) : '';
-      sp.querySelector('.progress div').style.width = s.duration ? Math.min(100, s.position / s.duration * 100) + '%' : 0;
-      sp.querySelector('.pp').textContent = s.state === 'playing' ? '⏸' : '▶';
+      $('.track', sp).textContent = s.name || '–';
+      $('.artist', sp).textContent = s.artist || '';
+      $('.time', sp).textContent = s.duration ? '−' + fmt(s.duration - s.position) + ' / ' + fmt(s.duration) : '';
+      $('.progress div', sp).style.width = s.duration ? Math.min(100, s.position / s.duration * 100) + '%' : 0;
+      $('.pp', sp).textContent = s.state === 'playing' ? '⏸' : '▶';
       if (!volDragging && !volSending) {
         volInput.value = s.volume;
-        sp.querySelector('.volnum').textContent = s.volume;
+        $('.volnum', sp).textContent = s.volume;
       }
     }
 
-    // connection: 'server' (page can't reach the server) or the server's QLab state: 'offline', 'noreply', 'ok'.
+    // --- Status rendering ---
+    // connection: 'server' (page can't reach the server) or the server's QLab state.
     const CONNECTION_TEXT = {
       server: ['EI YHTEYTTÄ PALVELIMEEN', 'Tarkista wifi ja että palvelin on käynnissä Macilla.'],
       offline: ['EI YHTEYTTÄ QLABIIN', 'Onko QLab käynnissä?'],
       noreply: ['QLAB EI VASTAA', 'Onko workspace auki ja OSC sallittu?'],
+      badpass: ['QLAB HYLKÄSI PASSCODEN', 'Tarkista qlabPasscode config.jsonissa.'],
+      denied: ['QLAB ESTI YHTEYDEN', 'Anna OSC-yhteydelle oikeudet tai aseta passcode.'],
     };
 
     function renderConnection(connection) {
@@ -227,21 +344,29 @@
       const text = CONNECTION_TEXT[connection];
       bannerEl.hidden = !text;
       if (text) {
-        bannerEl.querySelector('strong').textContent = text[0];
-        bannerEl.querySelector('span').textContent = text[1];
+        $('strong', bannerEl).textContent = text[0];
+        $('span', bannerEl).textContent = text[1];
       }
       connEl.classList.toggle('on', connection === 'ok');
       connEl.textContent = connection === 'ok' ? 'QLab yhdistetty' : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
     }
 
+    function renderPlayhead(p) {
+      playheadEl.classList.toggle('empty', !p);
+      $('.ph-num', playheadEl).textContent = p ? p.number : '';
+      $('.ph-name', playheadEl).textContent = p ? (p.name || p.type) : 'Ei cuea valmiina';
+    }
+
     function render(status) {
+      lastStatus = status;
       renderConnection(status.qlab);
-      renderSpotify(status.spotify);
+      if (config.spotify) renderSpotify(status.spotify);
+      if (config.playhead) renderPlayhead(status.playhead);
       for (const [cue, btn] of Object.entries(cueButtons)) {
         const s = status.cues[cue];
-        const name = btn.querySelector('.name');
-        const info = btn.querySelector('.info');
-        const bar = btn.querySelector('.bar');
+        const name = $('.name', btn);
+        const info = $('.info', btn);
+        const bar = $('.bar', btn);
         btn.classList.toggle('running', !!(s && s.running && !s.paused));
         btn.classList.toggle('paused', !!(s && s.paused));
         if (!s) { name.textContent = ''; info.textContent = ''; bar.style.width = 0; continue; }
@@ -253,41 +378,102 @@
         if (!s.duration) time = active ? fmt(s.elapsed) : '–';
         else time = (active ? '−' + fmt(s.duration - s.elapsed) : fmt(s.duration)) + ' / ' + fmt(s.duration);
         info.innerHTML = '<span class="state"></span><span class="time"></span>';
-        info.querySelector('.state').textContent = label;
-        info.querySelector('.time').textContent = time;
+        $('.state', info).textContent = label;
+        $('.time', info).textContent = time;
         bar.style.width = active && s.duration ? Math.min(100, s.elapsed / s.duration * 100) + '%' : 0;
       }
     }
 
-    // A status request that takes longer than this counts as a lost connection, so stale
-    // cue info never stays on screen looking current.
+    // Status arrives over Server-Sent Events about four times a second. If nothing arrives for
+    // STATUS_TIMEOUT_MS the connection counts as lost, so stale cue info never looks current.
     const STATUS_TIMEOUT_MS = 2000;
-
-    async function poll() {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), STATUS_TIMEOUT_MS);
-      try {
-        const res = await fetch('/status', { cache: 'no-store', signal: ctrl.signal });
-        render(await res.json());
-      } catch {
-        render({ qlab: 'server', cues: {}, spotify: null });
-      }
-      clearTimeout(timer);
-      setTimeout(poll, 300);
+    let watchdog = null;
+    function resetWatchdog() {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => render({ qlab: 'server', cues: {}, playhead: null, spotify: null }), STATUS_TIMEOUT_MS);
     }
 
-    fetch('/cues').then(r => r.json()).then(cues => {
-      for (const cue of cues) {
+    function listen() {
+      const events = new EventSource('/events');
+      events.onmessage = e => { resetWatchdog(); render(JSON.parse(e.data)); };
+      // EventSource reconnects by itself; a 401 (e.g. PIN changed) closes it for good.
+      events.onerror = async () => {
+        if (events.readyState === EventSource.CLOSED) {
+          const res = await fetch('/config').catch(() => null);
+          if (res?.status === 401) showLogin();
+          else setTimeout(listen, 2000);
+        }
+      };
+      resetWatchdog();
+    }
+
+    // --- Setup ---
+    function buildUi() {
+      for (const cue of config.cues) {
         const btn = document.createElement('button');
-        btn.className = 'cue';
-        btn.innerHTML = '<span>GO</span><span class="num"></span><span class="name"></span><span class="info"></span><span class="bar"></span>';
-        btn.querySelector('.num').textContent = cue;
-        btn.addEventListener('click', () => qlabCommand('/go/' + encodeURIComponent(cue), btn, 'GO cue ' + cue, 30));
+        btn.className = 'cue' + (cue.label ? ' labelled' : '');
+        btn.style.setProperty('--bg', cue.color);
+        btn.innerHTML = '<span class="go"></span><span class="num"></span><span class="name"></span><span class="info"></span><span class="bar"></span>';
+        $('.go', btn).textContent = cue.label ? 'GO · ' + cue.number : 'GO';
+        $('.num', btn).textContent = cue.label || cue.number;
+        if (cue.spotifyFadeOut && config.spotify) {
+          const badge = document.createElement('span');
+          badge.className = 'badge';
+          badge.textContent = '♪ musiikki alas';
+          btn.appendChild(badge);
+        }
+        btn.addEventListener('click', () => qlabCommand('/go/' + encodeURIComponent(cue.number), btn, 'GO cue ' + cue.number, 30));
+        longPress(btn, () => openSheet(cue));
         cuesEl.appendChild(btn);
-        cueButtons[cue] = btn;
+        cueButtons[cue.number] = btn;
       }
-      poll();
-    }).catch(() => renderConnection('server'));
+      cuesEl.hidden = !config.cues.length;
+
+      playheadEl.hidden = !config.playhead;
+      playheadEl.classList.toggle('solo', !config.cues.length);
+      playheadEl.querySelectorAll('[data-ph]').forEach(btn => btn.addEventListener('click', () => {
+        const ph = btn.dataset.ph;
+        qlabCommand('/playhead/' + ph, btn, ph === 'go' ? 'GO ' + $('.ph-num', playheadEl).textContent : 'Playhead ' + (ph === 'next' ? 'alas' : 'ylös'), 30);
+      }));
+
+      sp.hidden = !config.spotify;
+
+      const fade = () => qlabCommand('/fade', fadeBtn, 'FADE', 30);
+      $('small', fadeBtn).textContent = config.fadeSeconds + ' s' + (config.fadeConfirm ? ' · tuplanapautus' : '');
+      if (config.fadeConfirm) doubleTap(fadeBtn, fade);
+      else fadeBtn.addEventListener('click', fade);
+      doubleTap(stopBtn, () => qlabCommand('/stop', stopBtn, 'STOP', [30, 50, 30]));
+    }
+
+    function showLogin() {
+      const login = $('#login');
+      login.hidden = false;
+      $('input', login).focus();
+    }
+
+    $('#login form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const input = $('#login input');
+      const err = $('#login .err');
+      err.textContent = '';
+      const res = await fetch('/login', { method: 'POST', body: input.value }).catch(() => null);
+      if (res?.ok) location.reload();
+      else { err.textContent = res ? 'Väärä PIN' : 'Ei yhteyttä palvelimeen'; input.value = ''; }
+    });
+
+    async function init() {
+      try {
+        const res = await fetch('/config');
+        if (res.status === 401) return showLogin();
+        config = await res.json();
+      } catch {
+        renderConnection('server');
+        return setTimeout(init, 2000);
+      }
+      buildUi();
+      listen();
+    }
+    init();
   </script>
 </body>
 </html>

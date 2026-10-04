@@ -1,0 +1,16 @@
+{
+  "port": 8080,
+  "qlabHost": "127.0.0.1",
+  "qlabPort": 53000,
+  "qlabPasscode": "",
+  "pin": "",
+  "fadeSeconds": 2,
+  "fadeConfirm": false,
+  "playhead": false,
+  "spotify": true,
+  "spotifyFadeSeconds": 2,
+  "cues": [
+    { "number": "1", "label": "Intro", "color": "green", "spotifyFadeOut": true },
+    { "number": "2", "label": "Palkinnot", "color": "blue" }
+  ]
+}

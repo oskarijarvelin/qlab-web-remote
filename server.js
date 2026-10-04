@@ -1,7 +1,9 @@
 // QLab web remote: serves a mobile page and controls QLab over OSC/TCP (SLIP-framed).
 // Commands wait for QLab's reply, so the page only shows success once QLab has confirmed it.
+// Status is pushed to the page with Server-Sent Events.
 // Spotify (desktop app on the same Mac) is controlled and polled via AppleScript.
 const http = require('http');
+const crypto = require('crypto');
 const { execFile, execFileSync } = require('child_process');
 const net = require('net');
 const fs = require('fs');
@@ -9,13 +11,73 @@ const path = require('path');
 const os = require('os');
 const { qrTerminal } = require('./qr');
 
-const PORT = Number(process.env.PORT) || 8080;
-const QLAB_HOST = process.env.QLAB_HOST || '127.0.0.1';
-const QLAB_PORT = Number(process.env.QLAB_PORT) || 53000;
-const FADE_SECONDS = Number(process.env.FADE_SECONDS) || 2;
-const FADE_CONFIRM = process.env.FADE_CONFIRM === '1';
-const ALLOWED_CUES = (process.env.CUES || '1,2').split(',').map((c) => c.trim());
+// --- Config: defaults <- config.json <- environment variables ---
+const COLORS = {
+  green: '#1f7a3a', blue: '#1f4f8a', purple: '#5b2d8a', orange: '#a0521a',
+  red: '#8a1f1f', teal: '#1a6b6b', gray: '#444444',
+};
 
+function loadConfig() {
+  // CONFIG lets you keep one file per event, e.g. CONFIG=events/gala.json npm start
+  const file = process.env.CONFIG ? path.resolve(process.env.CONFIG) : path.join(__dirname, 'config.json');
+  let fileConfig = {};
+  if (process.env.CONFIG && !fs.existsSync(file)) {
+    console.error(`Config file not found: ${file}`);
+    process.exit(1);
+  }
+  if (fs.existsSync(file)) {
+    try {
+      fileConfig = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (err) {
+      console.error(`${path.basename(file)} is not valid JSON: ${err.message}`);
+      process.exit(1);
+    }
+    console.log(`Using config: ${file}`);
+  }
+  const env = process.env;
+  const c = {
+    port: 8080,
+    qlabHost: '127.0.0.1',
+    qlabPort: 53000,
+    qlabPasscode: '',
+    pin: '',
+    fadeSeconds: 2,
+    fadeConfirm: false,
+    playhead: false,
+    spotify: true,
+    spotifyFadeSeconds: 2,
+    cues: [{ number: '1' }, { number: '2' }],
+    ...fileConfig,
+  };
+  if (env.PORT) c.port = Number(env.PORT);
+  if (env.QLAB_HOST) c.qlabHost = env.QLAB_HOST;
+  if (env.QLAB_PORT) c.qlabPort = Number(env.QLAB_PORT);
+  if (env.QLAB_PASSCODE) c.qlabPasscode = env.QLAB_PASSCODE;
+  if (env.PIN) c.pin = env.PIN;
+  if (env.FADE_SECONDS) c.fadeSeconds = Number(env.FADE_SECONDS);
+  if (env.FADE_CONFIRM) c.fadeConfirm = env.FADE_CONFIRM === '1';
+  if (env.CUES) c.cues = env.CUES.split(',').map((n) => ({ number: n.trim() }));
+
+  c.cues = c.cues.map((cue) => {
+    const number = String(cue.number ?? '').trim();
+    if (!number || /[\s/#*?,[\]{}]/.test(number)) {
+      console.error(`Invalid cue number in config: "${cue.number}" (no spaces or OSC special characters)`);
+      process.exit(1);
+    }
+    const color = COLORS[cue.color] || (/^#[0-9a-f]{6}$/i.test(cue.color || '') ? cue.color : COLORS.green);
+    return { number, label: cue.label ? String(cue.label) : '', color, spotifyFadeOut: !!cue.spotifyFadeOut };
+  });
+  if (!c.cues.length && !c.playhead) {
+    console.error('Nothing to control: add cues to config.json or set "playhead": true');
+    process.exit(1);
+  }
+  return c;
+}
+
+const config = loadConfig();
+const cueConfig = new Map(config.cues.map((cue) => [cue.number, cue]));
+
+// --- OSC encoding ---
 function oscString(str) {
   const buf = Buffer.from(str + '\0');
   const padded = Buffer.alloc(Math.ceil(buf.length / 4) * 4);
@@ -92,11 +154,15 @@ const COMMAND_TIMEOUT_MS = 1000;
 // If status polls go unanswered this long, QLab is reachable but not responding (e.g. no workspace open).
 const STALE_MS = 2000;
 const STATUS_KEYS = JSON.stringify(['displayName', 'isRunning', 'isPaused', 'duration', 'actionElapsed']);
+const PLAYHEAD_KEYS = JSON.stringify(['number', 'displayName', 'type']);
 
-// qlab: 'offline' (no TCP connection), 'noreply' (connected, no workspace answering) or 'ok'.
-const status = { qlab: 'offline', cues: {}, spotify: { running: false } };
+// qlab: 'offline' (no TCP connection), 'noreply' (no workspace answering), 'badpass' (wrong passcode),
+// 'denied' (connection lacks permissions) or 'ok'.
+const status = { qlab: 'offline', cues: {}, playhead: null, spotify: { running: false } };
 let qlabSocket = null;
 let lastStatusReply = 0;
+let lastDenied = 0;
+let badPasscode = false;
 // Pending command replies keyed by the OSC address that was sent; QLab replies to /x on /reply/x.
 const pending = new Map();
 
@@ -122,6 +188,23 @@ function qlabRequest(address, args) {
 }
 
 function handleReply(address, reply) {
+  if (address === '/connect') {
+    badPasscode = reply.status === 'badpass' || reply.data === 'badpass';
+    console.log(badPasscode ? 'QLab rejected the passcode' : 'QLab passcode accepted');
+    return;
+  }
+
+  if (reply.status === 'denied') lastDenied = Date.now();
+
+  if (address === '/cue/playhead/valuesForKeys') {
+    lastStatusReply = Date.now();
+    // QLab answers with an error when no cue is standing by.
+    status.playhead = reply.status === 'ok' && reply.data
+      ? { number: reply.data.number || '', name: reply.data.displayName || '', type: reply.data.type || '' }
+      : null;
+    return;
+  }
+
   const cueStatus = /^\/cue\/([^/]+)\/valuesForKeys$/.exec(address);
   if (cueStatus) {
     lastStatusReply = Date.now();
@@ -148,20 +231,35 @@ function handleReply(address, reply) {
   else entry.reject(new QlabError('QLab: virhe (onko cue olemassa?)', 502));
 }
 
+function qlabState() {
+  if (!qlabSocket) return 'offline';
+  if (badPasscode) return 'badpass';
+  if (Date.now() - lastDenied < STALE_MS) return 'denied';
+  return Date.now() - lastStatusReply < STALE_MS ? 'ok' : 'noreply';
+}
+
 function connectQlab() {
-  const sock = net.createConnection({ host: QLAB_HOST, port: QLAB_PORT });
+  const sock = net.createConnection({ host: config.qlabHost, port: config.qlabPort });
   let pollTimer = null;
+  const send = (address, args) => sock.write(slipEncode(encodeOsc(address, args)));
 
   sock.on('connect', () => {
     qlabSocket = sock;
+    badPasscode = false;
     lastStatusReply = Date.now(); // grace period so the first poll isn't reported as unanswered
     console.log('Connected to QLab');
+    // The passcode must come before any other message.
+    if (config.qlabPasscode) send('/connect', [config.qlabPasscode]);
     // Without this QLab doesn't reply to action commands like /start and /stop.
-    sock.write(slipEncode(encodeOsc('/alwaysReply', [1])));
+    send('/alwaysReply', [1]);
     pollTimer = setInterval(() => {
-      for (const cue of ALLOWED_CUES) sock.write(slipEncode(encodeOsc(`/cue/${cue}/valuesForKeys`, [STATUS_KEYS])));
-      status.qlab = Date.now() - lastStatusReply < STALE_MS ? 'ok' : 'noreply';
-      if (status.qlab === 'noreply') status.cues = {};
+      for (const cue of config.cues) send(`/cue/${cue.number}/valuesForKeys`, [STATUS_KEYS]);
+      if (config.playhead) send('/cue/playhead/valuesForKeys', [PLAYHEAD_KEYS]);
+      status.qlab = qlabState();
+      if (status.qlab !== 'ok') {
+        status.cues = {};
+        status.playhead = null;
+      }
     }, POLL_MS);
   });
 
@@ -181,6 +279,7 @@ function connectQlab() {
     qlabSocket = null;
     status.qlab = 'offline';
     status.cues = {};
+    status.playhead = null;
     for (const entries of pending.values()) {
       for (const entry of entries) {
         clearTimeout(entry.timer);
@@ -198,9 +297,9 @@ connectQlab();
 const SPOTIFY_POLL_MS = 1000;
 const SPOTIFY_COMMANDS = { playpause: 'playpause', next: 'next track', previous: 'previous track' };
 
-function osascript(script) {
+function osascript(script, timeout = 3000) {
   return new Promise((resolve, reject) => {
-    execFile('osascript', ['-e', script], { timeout: 3000 }, (err, stdout) => (err ? reject(err) : resolve(stdout.trim())));
+    execFile('osascript', ['-e', script], { timeout }, (err, stdout) => (err ? reject(err) : resolve(stdout.trim())));
   });
 }
 
@@ -236,91 +335,201 @@ async function refreshSpotify() {
   }
 }
 
-(async function pollSpotify() {
-  await refreshSpotify();
-  setTimeout(pollSpotify, SPOTIFY_POLL_MS);
-})();
+// Fades Spotify to silence, pauses it and restores the original volume for the next play.
+// Runs as one osascript process so the steps stay evenly timed.
+let spotifyFading = false;
+async function fadeOutSpotify(seconds) {
+  if (spotifyFading) return;
+  spotifyFading = true;
+  const steps = Math.max(1, Math.round(seconds * 10));
+  const script = `
+if application "Spotify" is running then
+  tell application "Spotify"
+    if player state is playing then
+      set v to sound volume
+      repeat with i from 1 to ${steps}
+        set sound volume to (v * (${steps} - i) / ${steps}) as integer
+        delay ${(seconds / steps).toFixed(3)}
+      end repeat
+      pause
+      set sound volume to v
+    end if
+  end tell
+end if`;
+  try {
+    await osascript(script, seconds * 1000 + 5000);
+    console.log(`${new Date().toLocaleTimeString()}  Spotify faded out (${seconds}s)`);
+  } catch (err) {
+    console.error(`Spotify fade failed: ${err.message}`);
+  }
+  spotifyFading = false;
+  refreshSpotify();
+}
+
+if (config.spotify) {
+  (async function pollSpotify() {
+    await refreshSpotify();
+    setTimeout(pollSpotify, SPOTIFY_POLL_MS);
+  })();
+} else {
+  status.spotify = null;
+}
+
+// --- PIN ---
+// The cookie holds a hash of the PIN, so it survives server restarts and stops working when the PIN changes.
+const AUTH_COOKIE = 'qlr';
+const authToken = config.pin ? crypto.createHash('sha256').update('qlab-web-remote:' + config.pin).digest('hex') : null;
+
+function isAuthorized(req) {
+  if (!authToken) return true;
+  const match = /(?:^|;\s*)qlr=([0-9a-f]{64})/.exec(req.headers.cookie || '');
+  return !!match && crypto.timingSafeEqual(Buffer.from(match[1]), Buffer.from(authToken));
+}
+
+function readBody(req, limit = 1024) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > limit) { reject(new Error('Body too large')); req.destroy(); }
+    });
+    req.on('end', () => resolve(body));
+  });
+}
+
+// --- Server-Sent Events ---
+const sseClients = new Set();
+setInterval(() => {
+  if (!sseClients.size) return;
+  const payload = `data: ${JSON.stringify(status)}\n\n`;
+  for (const res of sseClients) res.write(payload);
+}, POLL_MS);
 
 // --- HTTP ---
 const indexHtml = fs.readFileSync(path.join(__dirname, 'index.html'));
+const log = (msg) => console.log(`${new Date().toLocaleTimeString()}  ${msg}`);
 
 async function runQlabCommand(res, label, address, args) {
   try {
     await qlabRequest(address, args);
-    console.log(`${new Date().toLocaleTimeString()}  ${label}`);
+    log(label);
     res.writeHead(204);
     res.end();
   } catch (err) {
-    console.error(`${new Date().toLocaleTimeString()}  ${label} FAILED: ${err.message}`);
+    log(`${label} FAILED: ${err.message}`);
     res.writeHead(err.httpStatus || 500, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(err.message);
   }
 }
 
+function sendJson(res, data) {
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(data));
+}
+
+function sendText(res, code, text) {
+  res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(text);
+}
+
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'GET' && req.url === '/') {
+  const { method, url } = req;
+
+  if (method === 'GET' && url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(indexHtml);
   }
 
-  if (req.method === 'GET' && req.url === '/cues') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(ALLOWED_CUES));
+  if (method === 'POST' && url === '/login') {
+    let pin = '';
+    try { pin = (await readBody(req)).trim(); } catch { return sendText(res, 413, 'Too large'); }
+    if (!authToken || pin === config.pin) {
+      res.writeHead(204, authToken ? { 'Set-Cookie': `${AUTH_COOKIE}=${authToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000` } : {});
+      return res.end();
+    }
+    // Slow down guessing.
+    await new Promise((r) => setTimeout(r, 1000));
+    log('Wrong PIN attempt');
+    return sendText(res, 401, 'Väärä PIN');
   }
 
-  if (req.method === 'GET' && req.url === '/config') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ fadeSeconds: FADE_SECONDS, fadeConfirm: FADE_CONFIRM }));
+  if (!isAuthorized(req)) return sendText(res, 401, 'PIN vaaditaan');
+
+  if (method === 'GET' && url === '/config') {
+    return sendJson(res, {
+      fadeSeconds: config.fadeSeconds,
+      fadeConfirm: config.fadeConfirm,
+      playhead: config.playhead,
+      spotify: config.spotify,
+      cues: config.cues,
+    });
   }
 
-  if (req.method === 'GET' && req.url === '/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify(status));
+  if (method === 'GET' && url === '/status') return sendJson(res, status);
+
+  if (method === 'GET' && url === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+    res.write(`retry: 1000\ndata: ${JSON.stringify(status)}\n\n`);
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+    return;
   }
 
-  if (req.method === 'POST' && req.url === '/fade') {
-    return runQlabCommand(res, `FADE all (${FADE_SECONDS}s)`, '/panicInTime', [FADE_SECONDS]);
+  if (method === 'POST' && url === '/fade') {
+    return runQlabCommand(res, `FADE all (${config.fadeSeconds}s)`, '/panicInTime', [config.fadeSeconds]);
   }
 
-  if (req.method === 'POST' && req.url === '/stop') {
-    return runQlabCommand(res, 'STOP all', '/stop');
+  if (method === 'POST' && url === '/stop') return runQlabCommand(res, 'STOP all', '/stop');
+
+  const playheadMatch = method === 'POST' && config.playhead && url.match(/^\/playhead\/(go|next|previous)$/);
+  if (playheadMatch) {
+    const action = playheadMatch[1];
+    if (action === 'go') {
+      const cue = status.playhead ? `${status.playhead.number || '?'} ${status.playhead.name}` : '(none)';
+      return runQlabCommand(res, `GO playhead ${cue}`, '/go');
+    }
+    return runQlabCommand(res, `Playhead ${action}`, `/playhead/${action}`);
   }
 
-  const spotifyMatch = req.method === 'POST' && req.url.match(/^\/spotify\/(\w+)(?:\/(\d+))?$/);
+  const spotifyMatch = method === 'POST' && config.spotify && url.match(/^\/spotify\/(\w+)(?:\/(\d+))?$/);
   if (spotifyMatch) {
     const [, action, value] = spotifyMatch;
     let script;
     if (action === 'volume' && value !== undefined) script = `tell application "Spotify" to set sound volume to ${Math.min(100, Number(value))}`;
     else if (SPOTIFY_COMMANDS[action]) script = `tell application "Spotify" to ${SPOTIFY_COMMANDS[action]}`;
-    if (!script) {
-      res.writeHead(404);
-      return res.end('Unknown Spotify command');
-    }
+    if (!script) return sendText(res, 404, 'Unknown Spotify command');
     try {
       await osascript(script);
-      console.log(`${new Date().toLocaleTimeString()}  Spotify ${action}${value !== undefined ? ' ' + value : ''}`);
+      log(`Spotify ${action}${value !== undefined ? ' ' + value : ''}`);
       refreshSpotify();
       res.writeHead(204);
       return res.end();
     } catch (err) {
       console.error(err.message);
-      res.writeHead(500);
-      return res.end('Spotify command failed');
+      return sendText(res, 500, 'Spotify command failed');
     }
   }
 
-  const match = req.method === 'POST' && req.url.match(/^\/go\/([^/]+)$/);
-  if (match) {
-    const cue = decodeURIComponent(match[1]);
-    if (!ALLOWED_CUES.includes(cue)) {
-      res.writeHead(404);
-      return res.end('Unknown cue');
-    }
-    return runQlabCommand(res, `GO cue ${cue}`, `/cue/${cue}/start`);
+  const cueMatch = method === 'POST' && url.match(/^\/cue\/([^/]+)\/(pause|stop|fade)$/);
+  if (cueMatch) {
+    const cue = decodeURIComponent(cueMatch[1]);
+    if (!cueConfig.has(cue)) return sendText(res, 404, 'Unknown cue');
+    const action = cueMatch[2];
+    if (action === 'pause') return runQlabCommand(res, `Toggle pause cue ${cue}`, `/cue/${cue}/togglePause`);
+    if (action === 'stop') return runQlabCommand(res, `STOP cue ${cue}`, `/cue/${cue}/stop`);
+    return runQlabCommand(res, `FADE cue ${cue} (${config.fadeSeconds}s)`, `/cue/${cue}/panicInTime`, [config.fadeSeconds]);
   }
 
-  res.writeHead(404);
-  res.end('Not found');
+  const goMatch = method === 'POST' && url.match(/^\/go\/([^/]+)$/);
+  if (goMatch) {
+    const cue = cueConfig.get(decodeURIComponent(goMatch[1]));
+    if (!cue) return sendText(res, 404, 'Unknown cue');
+    // Music fades while the cue starts; waiting for the fade would feel like lag to the operator.
+    if (cue.spotifyFadeOut && config.spotify && status.spotify?.state === 'playing') fadeOutSpotify(config.spotifyFadeSeconds);
+    return runQlabCommand(res, `GO cue ${cue.number}`, `/cue/${cue.number}/start`);
+  }
+
+  sendText(res, 404, 'Not found');
 });
 
 // The Bonjour name (e.g. My-MacBook.local) stays the same when the Mac moves to another network.
@@ -332,14 +541,17 @@ function localHostname() {
   }
 }
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(config.port, '0.0.0.0', () => {
   const host = localHostname();
   const ips = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address);
-  const mainUrl = `http://${host || ips[0] || 'localhost'}:${PORT}`;
+  const mainUrl = `http://${host || ips[0] || 'localhost'}:${config.port}`;
 
-  console.log(`\nQLab remote running (QLab at ${QLAB_HOST}:${QLAB_PORT})\n`);
-  console.log(qrTerminal(mainUrl));
+  console.log(`\nQLab remote running (QLab at ${config.qlabHost}:${config.qlabPort})`);
+  console.log(`Cues: ${config.cues.map((c) => c.number + (c.label ? ` (${c.label})` : '')).join(', ')}`);
+  if (config.playhead) console.log('Playhead mode on');
+  if (config.pin) console.log('PIN required');
+  console.log('\n' + qrTerminal(mainUrl));
   console.log(`\n  Open on phone: ${mainUrl}`);
-  for (const ip of ips) console.log(`  or by IP:      http://${ip}:${PORT}`);
+  for (const ip of ips) console.log(`  or by IP:      http://${ip}:${config.port}`);
   console.log('\n  Stop with Ctrl+C\n');
 });
