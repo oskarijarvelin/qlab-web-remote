@@ -14,7 +14,7 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 - **Spotify**: soiva kappale ja edistyminen, edellinen / toista-tauko / seuraava sekä äänenvoimakkuus.
 - **Yhteyskatko näkyy:** jos puhelin ei saa yhteyttä palvelimeen tai palvelin QLabiin, näytön yläreunaan tulee punainen ilmoitus ja QLab-napit harmaantuvat.
 - **Macin äänenvoimakkuus:** liukusäädin ja mykistys Macin oletusäänilaitteelle.
-- **Pää- ja varakone:** jokainen komento lähtee kahteen QLabiin yhtä aikaa. Sivu näyttää varakoneen tilan, varoittaa jos koneet eivät ole samassa tilassa ja vaihtaa varakoneen näkymään, jos pääkone lakkaa vastaamasta.
+- **Pää- ja varakoneet:** jokainen komento lähtee pääkoneeseen ja yhteen tai useampaan varakoneeseen yhtä aikaa. Sivu näyttää varakoneiden tilan, varoittaa jos koneet eivät ole samassa tilassa ja vaihtaa varakoneen näkymään, jos pääkone lakkaa vastaamasta. Palvelin voi pyöriä myös omalla koneellaan.
 - **Useampi puhelin:** kaikki näkevät saman tilan, ja alareunan tilarivi kertoo kaikille viimeisimmän komennon, kuka sen lähetti ja milloin (esim. "GO 1 · Intro — Valomiehen Android · 12.37.30"). Toisen puhelimen komento välähtää sinisenä. Laitteelle voi antaa nimen ⚙-paneelissa. Ilman nimeä näytetään laitteen tyyppi ja IP-osoitteen loppu, esim. "iPhone (.42)".
 - **Valinnainen PIN** jaettuihin verkkoihin ja tuki QLabin **passcodelle**.
 - **Napit valitaan puhelimella:** ⚙-paneelissa on editori, jossa cuet lisätään suoraan QLabin cue-listasta ja niille annetaan teksti, väri ja Spotify-feidi. Muutokset tallentuvat `config.json`:iin ja päivittyvät kaikkiin avoimiin puhelimiin.
@@ -83,7 +83,7 @@ Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.exa
 | `spotify` | `true` | `false` = piilota Spotify-osio |
 | `spotifyFadeSeconds` | `2` | Spotify-feidin pituus "musiikki alas" -cueissa |
 | `macVolume` | `true` | `false` = piilota Macin äänenvoimakkuuden säädin |
-| `backup` | (ei) | Varakoneen QLab, esim. `{ "host": "192.168.1.21" }`. Valinnaiset `port` (oletus 53000), `workspace` ja `passcode` (oletuksena samat kuin pääkoneella). |
+| `backup` | (ei) | Varakone, esim. `{ "host": "192.168.1.21" }`, tai lista varakoneista. Valinnaiset `name` (näkyy sivulla), `port` (oletus 53000), `workspace` ja `passcode` (oletuksena samat kuin pääkoneella). |
 | `pin` | (ei) | Sivu kysyy tämän PIN-koodin kerran per laite |
 | `qlabWorkspace` | (ei) | Ohjattavan workspacen nimi (esim. `Gaala` tai `Gaala.qlab5`) tai tunnus. Ilman tätä komennot menevät kaikkiin avoimiin workspaceihin. |
 | `qlabPasscode` | (ei) | QLab-workspacen OSC-passcode |
@@ -91,27 +91,50 @@ Asetukset luetaan tiedostosta `config.json` repon kansiossa (malli: [`config.exa
 | `qlabHost` | `127.0.0.1` | QLab-koneen osoite |
 | `qlabPort` | `53000` | QLabin OSC-portti |
 
-Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_WORKSPACE`, `QLAB_PASSCODE`, `QLAB_BACKUP_HOST`, `PORT`, `QLAB_HOST`, `QLAB_PORT`.
+Ympäristömuuttujat ohittavat tiedoston asetukset: `CUES=1,2,3`, `FADE_SECONDS`, `FADE_CONFIRM=1`, `PIN`, `QLAB_WORKSPACE`, `QLAB_PASSCODE`, `QLAB_BACKUP_HOST` (useampi pilkulla eroteltuna), `PORT`, `QLAB_HOST`, `QLAB_PORT`.
 
 ### Useampi workspace tai QLab
 
 - **Monta workspacea auki samassa QLabissa:** ilman `qlabWorkspace`-asetusta QLab 5 välittää komennot kaikkiin avoimiin workspaceihin. Esimerkiksi GO cue 1 käynnistää cuen 1 jokaisessa workspacessa, jossa sellainen on. Sivu varoittaa tästä keltaisella ilmoituksella. Valitse ohjattava workspace asetuksella `qlabWorkspace`, jolloin muut workspacet eivät saa komentoja. Jos valittu workspace ei ole auki, sivu näyttää punaisen ilmoituksen eikä lähetä komentoja.
-- **QLab muilla koneilla:** palvelin ohjaa osoitteessa `qlabHost` olevaa QLabia (oletuksena tämä Mac) ja `backup`-asetuksella lisäksi varakonetta. Muut koneet verkossa eivät vaikuta siihen.
+- **QLab muilla koneilla:** palvelin ohjaa osoitteessa `qlabHost` olevaa QLabia (oletuksena tämä Mac) ja `backup`-asetuksella lisäksi varakoneita. Muut koneet verkossa eivät vaikuta siihen.
 
-### Pää- ja varakone
+### Pää- ja varakoneet
 
-Varakoneelle ei tarvita omaa palvelinta: riittää, että sillä on sama workspace auki ja OSC sallittu (Workspace Settings → Network). Lisää pääkoneen `config.json`:iin varakoneen osoite:
+Varakoneille ei tarvita omaa palvelinta: riittää, että niillä on sama workspace auki ja OSC sallittu (Workspace Settings → Network). Lisää palvelimen `config.json`:iin varakoneiden osoitteet:
 
 ```json
 { "qlabWorkspace": "Gaala", "backup": { "host": "192.168.1.21" } }
 ```
 
-- **Komennot** (GO, FADE, STOP, playhead ja cuekohtaiset) lähtevät molempiin koneisiin yhtä aikaa. Komento onnistuu, jos ainakin toinen kone kuittaa sen. Toisen koneen epäonnistuminen näkyy tilarivillä ⚠-varoituksena.
-- **Tila** näytetään pääkoneelta. Yläkulman merkki kertoo varakoneen tilan: **VARA ✓** (kunnossa), **VARA ≠** (ei samassa tilassa) tai **VARA ✕** (ei yhteyttä).
-- **Synkronointivahti:** jos jokin cue soi vain toisella koneella tai playhead on eri kohdassa yli 1,5 sekuntia, sivu varoittaa ja kertoo eron.
-- **Jos pääkone lakkaa vastaamasta,** sivu näyttää varakoneen tilan oranssilla ilmoituksella. Komennot menevät edelleen molempiin, joten pääkone jatkaa samasta kohdasta, jos se palaa.
+tai useampi varakone listana:
+
+```json
+{ "backup": [ { "host": "192.168.1.21" }, { "host": "192.168.1.22", "name": "varakone B" } ] }
+```
+
+- **Komennot** (GO, FADE, STOP, playhead ja cuekohtaiset) lähtevät kaikkiin koneisiin yhtä aikaa. Komento onnistuu, jos ainakin yksi kone kuittaa sen. Muiden koneiden epäonnistuminen näkyy tilarivillä ⚠-varoituksena.
+- **Tila** näytetään pääkoneelta. Yläkulman merkki kertoo varakoneiden tilan: **VARA ✓** (kunnossa), **VARA ≠** (ei samassa tilassa) tai **VARA ✕** (ei yhteyttä). Useammalla varakoneella merkki näyttää vastaavien koneiden määrän, esim. **VARA 1/2 ✕**.
+- **Synkronointivahti:** jos jokin cue soi vain osalla koneista tai playhead on eri kohdassa yli 1,5 sekuntia, sivu varoittaa ja kertoo eron.
+- **Jos pääkone lakkaa vastaamasta,** sivu näyttää ensimmäisen vastaavan varakoneen tilan oranssilla ilmoituksella. Komennot menevät edelleen kaikkiin, joten pääkone jatkaa samasta kohdasta, jos se palaa.
 - **Spotify ja Macin äänenvoimakkuus** ohjaavat vain sitä Macia, jolla palvelin pyörii.
-- **Palvelimen sijainti:** jos palvelinta ajava kone kaatuu, etäohjain lakkaa toimimasta. Palvelimen voi ajaa myös varakoneella (`qlabHost` = pääkoneen IP, `backup.host` = `127.0.0.1`) tai kolmannella koneella.
+
+### Palvelin omalla koneellaan
+
+Jos palvelinta ajava kone kaatuu, etäohjain lakkaa toimimasta. Palvelimen voi siksi ajaa erillisellä koneella, jolloin se ohjaa kaikkia QLabeja verkon yli:
+
+```json
+{
+  "qlabHost": "192.168.1.20",
+  "backup": [ { "host": "192.168.1.21" } ],
+  "qlabWorkspace": "Gaala",
+  "spotify": false,
+  "macVolume": false
+}
+```
+
+- Spotify ja Macin äänenvoimakkuus kannattaa ottaa pois, koska ne ohjaisivat palvelinkonetta.
+- Anna QLab-koneille kiinteät IP-osoitteet (tai käytä `.local`-nimiä) ja mieluiten kaapeliyhteys. macOS:n palomuuri voi kysyä QLabin verkkoyhteyksistä ensimmäisellä kerralla.
+- Palvelinkoneen ei tarvitse olla Mac, sillä QLab-ohjaus on tavallista Node.js:ää. Muilla käyttöjärjestelmillä käynnistä komennolla `node server.js`, koska `npm start` (`caffeinate`) ja `QLab Remote.command` ovat macOS-kohtaisia. Tätä ei ole testattu.
 
 ## Miten se toimii
 

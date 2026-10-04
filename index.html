@@ -79,7 +79,10 @@
     #banner span { font-size: 13px; opacity: .9; }
     #warn { background: #4a3a08; color: #ffe08a; border-radius: 14px; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
     #warn strong { font-size: 14px; }
-    #backup-chip { font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 3px 7px; border-radius: 6px; background: #1f5f33; color: #c9f5d5; }
+    header { gap: 10px; min-width: 0; }
+    header h1 { flex: none; white-space: nowrap; }
+    header .right { min-width: 0; }
+    #backup-chip { flex: none; white-space: nowrap; font-size: 11px; font-weight: 700; letter-spacing: .06em; padding: 3px 7px; border-radius: 6px; background: #1f5f33; color: #c9f5d5; }
     #backup-chip.bad { background: #6b1d18; color: #ffd2cc; }
     #backup-chip.drift { background: #6b5208; color: #ffe08a; }
     #warn.active-backup { background: #6b3a0a; color: #ffd0a0; }
@@ -534,20 +537,29 @@
 
     const QLAB_STATE_TEXT = { offline: 'ei yhteyttä', noworkspace: 'workspace ei auki', noreply: 'ei vastaa', badpass: 'väärä passcode', denied: 'ei oikeuksia', ok: 'ok' };
 
-    // Main + backup: header chip shows the backup's health; the notice explains any problem.
+    // Main + backups: the header chip sums up the backups' health; the notice explains the first problem.
+    const capitalize = text => text.charAt(0).toUpperCase() + text.slice(1);
     function renderBackup(b) {
       const chip = $('#backup-chip');
       chip.hidden = !b;
       backupWarning = null;
       if (b) {
-        const drift = !!b.outOfSync;
-        chip.textContent = b.backup !== 'ok' ? 'VARA ✕' : drift ? 'VARA ≠' : 'VARA ✓';
-        chip.className = b.backup !== 'ok' ? 'bad' : drift ? 'drift' : '';
-        chip.title = 'Varakone ' + b.host + ': ' + QLAB_STATE_TEXT[b.backup];
-        if (b.active) connEl.textContent = 'QLab · varakone';
-        if (b.active) backupWarning = ['PÄÄKONE EI VASTAA – näytetään varakone', 'Pääkone: ' + QLAB_STATE_TEXT[b.main] + '. Komennot menevät edelleen molempiin.', true];
-        else if (b.backup !== 'ok' && b.main === 'ok') backupWarning = ['Varakone: ' + QLAB_STATE_TEXT[b.backup], 'Komennot menevät vain pääkoneelle (' + b.host + ').'];
-        else if (drift) backupWarning = ['Varakone ei ole samassa tilassa', b.outOfSync];
+        const machines = b.machines;
+        const bad = machines.filter(m => m.state !== 'ok');
+        const drift = machines.filter(m => m.outOfSync);
+        const mark = bad.length ? '✕' : drift.length ? '≠' : '✓';
+        chip.textContent = machines.length === 1 ? 'VARA ' + mark : 'VARA ' + (machines.length - bad.length) + '/' + machines.length + ' ' + mark;
+        chip.className = bad.length ? 'bad' : drift.length ? 'drift' : '';
+        chip.title = machines.map(m => capitalize(m.label) + ' ' + m.host + ': ' + QLAB_STATE_TEXT[m.state]).join('\n');
+        if (b.active) {
+          connEl.textContent = 'QLab · ' + b.active;
+          backupWarning = ['PÄÄKONE EI VASTAA – näytetään ' + b.active, 'Pääkone: ' + QLAB_STATE_TEXT[b.main] + '. Komennot menevät edelleen kaikkiin koneisiin.', true];
+        } else if (bad.length && b.main === 'ok') {
+          backupWarning = [bad.map(m => capitalize(m.label) + ': ' + QLAB_STATE_TEXT[m.state]).join(' · '),
+            'Komennot eivät mene ' + (bad.length === 1 ? 'tälle koneelle' : 'näille koneille') + ' (' + bad.map(m => m.host).join(', ') + ').'];
+        } else if (drift.length) {
+          backupWarning = [(drift.length === 1 ? capitalize(drift[0].label) + ' ei ole' : 'Varakoneet eivät ole') + ' samassa tilassa', drift.map(m => m.outOfSync).join(' · ')];
+        }
       }
       renderWarning();
     }
@@ -569,7 +581,7 @@
         : null;
       renderWarning();
       connEl.classList.toggle('on', connection === 'ok');
-      connEl.textContent = connection === 'ok' ? 'QLab' + (workspace?.name ? ' · ' + workspace.name : ' yhdistetty')
+      connEl.textContent = connection === 'ok' ? 'QLab' + (workspace?.name ? ' · ' + workspace.name : '')
         : connection === 'server' ? 'Ei yhteyttä palvelimeen' : 'Ei yhteyttä QLabiin';
     }
 
@@ -609,7 +621,7 @@
       renderConnection(status.qlab, status.workspace);
       if (config.spotify) renderSpotify(status.spotify);
       if (config.macVolume) renderMac(status.mac);
-      if (config.backup) renderBackup(status.backup);
+      if (config.backup) renderBackup(status.backups);
       if (config.playhead) renderPlayhead(status.playhead);
       for (const cue of config.cues) {
         const btn = cueButtons[cue.number];
@@ -638,7 +650,7 @@
     let watchdog = null;
     function resetWatchdog() {
       clearTimeout(watchdog);
-      watchdog = setTimeout(() => render({ qlab: 'server', cues: {}, playhead: null, spotify: null, mac: null, backup: null }), STATUS_TIMEOUT_MS);
+      watchdog = setTimeout(() => render({ qlab: 'server', cues: {}, playhead: null, spotify: null, mac: null, backups: null }), STATUS_TIMEOUT_MS);
     }
 
     function listen() {

@@ -73,21 +73,25 @@ function loadConfig() {
   if (env.QLAB_PORT) c.qlabPort = Number(env.QLAB_PORT);
   if (env.QLAB_PASSCODE) c.qlabPasscode = env.QLAB_PASSCODE;
   if (env.QLAB_WORKSPACE) c.qlabWorkspace = env.QLAB_WORKSPACE;
-  if (env.QLAB_BACKUP_HOST) c.backup = { ...(c.backup || {}), host: env.QLAB_BACKUP_HOST };
+  if (env.QLAB_BACKUP_HOST) c.backup = env.QLAB_BACKUP_HOST.split(',').map((host) => ({ host: host.trim() }));
 
-  // Backup QLab: same workspace and passcode as the main one unless given separately.
-  if (c.backup) {
-    if (!c.backup.host) {
-      console.error('config: backup needs a host, e.g. "backup": { "host": "192.168.1.21" }');
+  // Backup QLabs: "backup" is one machine ({ host }) or a list of them. Each uses the main
+  // machine's workspace and passcode unless given separately.
+  const backups = c.backup ? (Array.isArray(c.backup) ? c.backup : [c.backup]) : [];
+  c.backups = backups.map((b, i) => {
+    if (!b?.host) {
+      console.error('config: each backup needs a host, e.g. "backup": { "host": "192.168.1.21" }');
       process.exit(1);
     }
-    c.backup = {
-      host: String(c.backup.host),
-      port: Number(c.backup.port) || 53000,
-      workspace: c.backup.workspace ?? c.qlabWorkspace,
-      passcode: c.backup.passcode ?? c.qlabPasscode,
+    return {
+      name: String(b.name || (backups.length > 1 ? `varakone ${i + 1}` : 'varakone')),
+      host: String(b.host),
+      port: Number(b.port) || 53000,
+      workspace: b.workspace ?? c.qlabWorkspace,
+      passcode: b.passcode ?? c.qlabPasscode,
     };
-  }
+  });
+  delete c.backup;
   if (env.PIN) c.pin = env.PIN;
   if (env.FADE_SECONDS) c.fadeSeconds = Number(env.FADE_SECONDS);
   if (env.FADE_CONFIRM) c.fadeConfirm = env.FADE_CONFIRM === '1';
@@ -130,7 +134,7 @@ function saveCues(cues) {
 
   config.cues = cues;
   cueConfig = new Map(cues.map((cue) => [cue.number, cue]));
-  for (const q of [main, backup]) if (q) q.cues = {};
+  for (const q of allQlabs) q.cues = {};
 }
 
 // Flattens QLab's nested cue lists (groups contain cues) into rows for the cue picker.
@@ -238,7 +242,7 @@ const APP_LEVEL = new Set(['/alwaysReply', '/workspaces', '/version']);
 // lastCommand: the most recent command from any phone, so every phone can show who did what.
 const status = {
   qlab: 'offline', cues: {}, playhead: null, workspace: { name: null, open: [] },
-  backup: null, mac: null, spotify: { running: false }, lastCommand: null,
+  backups: null, mac: null, spotify: { running: false }, lastCommand: null,
 };
 
 class QlabError extends Error {
@@ -266,7 +270,7 @@ class QlabConnection {
   }
 
   log(msg) {
-    log(backup ? `[${this.label}] ${msg}` : msg);
+    log(config.backups.length ? `[${this.label}] ${msg}` : msg);
   }
 
   // Without a workspace setting, messages go to every open workspace (QLab 5 behaviour). With it,
@@ -453,32 +457,34 @@ class QlabConnection {
 const main = new QlabConnection({
   label: 'pääkone', host: config.qlabHost, port: config.qlabPort, workspace: config.qlabWorkspace, passcode: config.qlabPasscode,
 });
-const backup = config.backup ? new QlabConnection({ label: 'varakone', ...config.backup }) : null;
+const backups = config.backups.map(({ name, ...b }) => new QlabConnection({ label: name, ...b }));
+const allQlabs = [main, ...backups];
+const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
-// The QLab whose state is shown: the main machine, or the backup while the main one is down.
+// The QLab whose state is shown: the main machine, or the first answering backup while it is down.
 function activeQlab() {
-  if (backup && main.state !== 'ok' && backup.state === 'ok') return backup;
-  return main;
+  if (main.state === 'ok') return main;
+  return backups.find((q) => q.state === 'ok') || main;
 }
 
-// Compares what main and backup are doing, so a backup that has drifted out of step is noticed
-// before it is needed. A difference has to last SYNC_GRACE_MS to count.
-let syncMismatchSince = null;
-function checkSync() {
-  if (main.state !== 'ok' || backup.state !== 'ok') { syncMismatchSince = null; return null; }
+// Compares every other answering machine with the one being shown, so a backup that has drifted
+// out of step is noticed before it is needed. A difference has to last SYNC_GRACE_MS to count.
+const syncMismatchSince = new Map();
+function checkSync(reference, q) {
+  if (q === reference || reference.state !== 'ok' || q.state !== 'ok') { syncMismatchSince.delete(q); return null; }
   const describe = (c) => (!c?.found ? 'puuttuu' : c.paused ? 'tauolla' : c.running ? 'soi' : 'ei soi');
   let reason = null;
   for (const cue of config.cues) {
-    const a = describe(main.cues[cue.number]);
-    const b = describe(backup.cues[cue.number]);
-    if (a !== b) { reason = `Cue ${cue.number}: pääkoneella ${a}, varakoneella ${b}`; break; }
+    const a = describe(reference.cues[cue.number]);
+    const b = describe(q.cues[cue.number]);
+    if (a !== b) { reason = `Cue ${cue.number} – ${reference.label}: ${a}, ${q.label}: ${b}`; break; }
   }
-  if (!reason && config.playhead && (main.playhead?.number || '') !== (backup.playhead?.number || '')) {
-    reason = `Playhead: pääkoneella ${main.playhead?.number || '–'}, varakoneella ${backup.playhead?.number || '–'}`;
+  if (!reason && config.playhead && (reference.playhead?.number || '') !== (q.playhead?.number || '')) {
+    reason = `Playhead – ${reference.label}: ${reference.playhead?.number || '–'}, ${q.label}: ${q.playhead?.number || '–'}`;
   }
-  if (!reason) { syncMismatchSince = null; return null; }
-  syncMismatchSince ??= Date.now();
-  return Date.now() - syncMismatchSince >= SYNC_GRACE_MS ? reason : null;
+  if (!reason) { syncMismatchSince.delete(q); return null; }
+  if (!syncMismatchSince.has(q)) syncMismatchSince.set(q, Date.now());
+  return Date.now() - syncMismatchSince.get(q) >= SYNC_GRACE_MS ? reason : null;
 }
 
 function updateStatus() {
@@ -487,29 +493,26 @@ function updateStatus() {
   status.cues = q.cues;
   status.playhead = q.playhead;
   status.workspace = q.ws;
-  status.backup = backup && {
-    active: q === backup, // the main machine is down and the backup is being shown
+  status.backups = backups.length ? {
+    active: q === main ? null : q.label, // the main machine is down and this backup is being shown
     main: main.state,
-    backup: backup.state,
-    host: backup.host,
-    outOfSync: checkSync(),
-  };
+    machines: backups.map((b) => ({ label: b.label, host: b.host, state: b.state, outOfSync: checkSync(q, b) })),
+  } : null;
 }
 
-// Sends a command to the main QLab and the backup at the same time. Succeeds if at least one of
-// them confirmed it; the other's failure is returned as a warning for the status line.
+// Sends a command to every QLab at the same time. Succeeds if at least one of them confirmed it;
+// the others' failures are returned as a warning for the status line.
 async function qlabCommandAll(address, args) {
-  const targets = backup ? [main, backup] : [main];
-  const results = await Promise.allSettled(targets.map((q) => q.request(address, args)));
+  const results = await Promise.allSettled(allQlabs.map((q) => q.request(address, args)));
   const failures = results
-    .map((r, i) => (r.status === 'rejected' ? { q: targets[i], err: r.reason } : null))
+    .map((r, i) => (r.status === 'rejected' ? { q: allQlabs[i], err: r.reason } : null))
     .filter(Boolean);
-  if (!backup) {
+  if (!backups.length) {
     if (failures.length) throw failures[0].err;
     return null;
   }
-  const describe = ({ q, err }) => `${q === main ? 'Pääkone' : 'Varakone'}: ${err.message}`;
-  if (failures.length === targets.length) throw new QlabError(failures.map(describe).join(' · '), failures[0].err.httpStatus || 502);
+  const describe = ({ q, err }) => `${capitalize(q.label)}: ${err.message}`;
+  if (failures.length === allQlabs.length) throw new QlabError(failures.map(describe).join(' · '), failures[0].err.httpStatus || 502);
   return failures.length ? failures.map(describe).join(' · ') : null;
 }
 
@@ -754,7 +757,7 @@ const server = http.createServer(async (req, res) => {
       playhead: config.playhead,
       spotify: config.spotify,
       macVolume: config.macVolume,
-      backup: !!config.backup,
+      backup: config.backups.length > 0,
       workspace: config.qlabWorkspace || null,
       cues: config.cues,
       colors: COLORS,
@@ -914,7 +917,7 @@ server.listen(config.port, '0.0.0.0', () => {
   console.log(`\nQLab remote running (QLab at ${config.qlabHost}:${config.qlabPort})`);
   console.log(`Cues: ${config.cues.map((c) => c.number + (c.label ? ` (${c.label})` : '')).join(', ')}`);
   if (config.qlabWorkspace) console.log(`Workspace: ${config.qlabWorkspace}`);
-  if (config.backup) console.log(`Backup QLab: ${config.backup.host}:${config.backup.port}`);
+  for (const b of config.backups) console.log(`Backup QLab (${b.name}): ${b.host}:${b.port}`);
   if (config.playhead) console.log('Playhead mode on');
   if (config.pin) console.log('PIN required');
   console.log('\n' + qrTerminal(mainUrl));
