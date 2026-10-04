@@ -13,7 +13,7 @@ Yksinkertainen mobiilikaukosäädin QLabille ja Spotifylle. Pieni Node-palvelin 
 - **STOP** pysäyttää kaikki cuet heti. Vaatii tuplanapautuksen vahinkopainallusten välttämiseksi.
 - **Spotify**: soiva kappale ja edistyminen, edellinen / toista-tauko / seuraava sekä äänenvoimakkuus.
 - **Yhteyskatko näkyy:** jos puhelin ei saa yhteyttä palvelimeen tai palvelin QLabiin, näytön yläreunaan tulee punainen ilmoitus ja QLab-napit harmaantuvat.
-- **Macin äänenvoimakkuus:** liukusäädin ja mykistys Macin oletusäänilaitteelle.
+- **Macin äänenvoimakkuus:** liukusäädin ja mykistys Macin oletusäänilaitteelle. Ne ovat lukittuina vahinkokosketusten varalta: 🔒 avaa ne, ja lukitus palaa 5 sekuntia viimeisen kosketuksen jälkeen.
 - **Pää- ja varakoneet:** jokainen komento lähtee pääkoneeseen ja yhteen tai useampaan varakoneeseen yhtä aikaa. Sivu näyttää varakoneiden tilan, varoittaa jos koneet eivät ole samassa tilassa ja vaihtaa varakoneen näkymään, jos pääkone lakkaa vastaamasta. Palvelin voi pyöriä myös omalla koneellaan.
 - **Useampi puhelin:** kaikki näkevät saman tilan, ja alareunan tilarivi kertoo kaikille viimeisimmän komennon, kuka sen lähetti ja milloin (esim. "GO 1 · Intro — Valomiehen Android · 12.37.30"). Toisen puhelimen komento välähtää sinisenä. Laitteelle voi antaa nimen ⚙-paneelissa. Ilman nimeä näytetään laitteen tyyppi ja IP-osoitteen loppu, esim. "iPhone (.42)".
 - **Valinnainen PIN** jaettuihin verkkoihin ja tuki QLabin **passcodelle**.
@@ -65,7 +65,7 @@ npm run service:install
 
 - Asennuksen aikana annetut `CONFIG` ja `PORT` välittyvät palveluun, esim. `CONFIG=keikat/gaala.json npm run service:install`.
 - Kun taustapalvelu on käynnissä, `npm start` ja `QLab Remote.command` ilmoittavat, että portti on jo käytössä.
-- macOS voi kysyä taustapalvelun ensimmäisellä käynnistyskerralla luvat verkkoyhteyksiin ja Spotifyn ohjaukseen. Jos kysymys ei näy, Spotify- tai verkkotoiminnot eivät ehkä toimi palveluna: tarkista asia ennen keikkaa.
+- macOS kysyy taustapalvelulta erikseen luvan ohjata Spotifya, koska palvelu on eri ohjelma kuin terminaali. Jos lupaa ei ole, Spotify-kortissa lukee "macOS ei salli ohjausta" ja lokissa on ohje. Lupa annetaan kohdassa Järjestelmäasetukset → Tietosuoja ja suojaus → Automaatio. Tarkista tämä ennen keikkaa.
 
 ## Tarkistuslista ennen tapahtumaa
 

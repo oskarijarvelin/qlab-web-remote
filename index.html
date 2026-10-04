@@ -97,6 +97,10 @@
     #mac.muted .mute { background: #8a1f1f; }
     #mac.muted input[type=range] { opacity: .4; }
     #mac.fixed input[type=range], #mac.fixed .volnum { opacity: .35; }
+    #mac .lock { flex: none; width: 40px; height: 40px; border-radius: 10px; background: #2a2a2a; font-size: 16px; }
+    #mac:not(.locked) .lock { background: #4a3a08; }
+    /* Locked: slider and mute ignore touches, so a stray tap or scroll can't change the volume. */
+    #mac.locked input[type=range], #mac.locked .mute { pointer-events: none; opacity: .35; }
     #conn { max-width: 55vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     body:not([data-connection="ok"]) .cue:not(.err),
     body:not([data-connection="ok"]) #playhead,
@@ -255,7 +259,8 @@
     </div>
     <label class="vol">🔈<input type="range" min="0" max="100" step="1" aria-label="Spotifyn äänenvoimakkuus"><span class="volnum"></span></label>
   </section>
-  <section id="mac" hidden>
+  <section id="mac" class="locked" hidden>
+    <button class="lock" aria-label="Avaa Macin äänenvoimakkuuden säätö">🔒</button>
     <span class="label">Mac</span>
     <input type="range" min="0" max="100" step="1" aria-label="Macin äänenvoimakkuus">
     <span class="volnum"></span>
@@ -482,8 +487,9 @@
     function renderSpotify(s) {
       sp.classList.toggle('off', !s || !s.running);
       if (!s || !s.running) {
-        $('.track', sp).textContent = 'Spotify ei ole käynnissä';
-        $('.artist', sp).textContent = '';
+        $('.track', sp).textContent = s?.error === 'noPermission' ? 'Spotify: macOS ei salli ohjausta'
+          : s?.error ? 'Spotify ei vastaa' : 'Spotify ei ole käynnissä';
+        $('.artist', sp).textContent = s?.error === 'noPermission' ? 'Järjestelmäasetukset → Tietosuoja ja suojaus → Automaatio' : '';
         $('.time', sp).textContent = '';
         $('.progress div', sp).style.width = 0;
         $('.pp', sp).textContent = '▶';
@@ -501,6 +507,23 @@
     const macEl = $('#mac');
     const macVolume = volumeSlider($('input[type=range]', macEl), $('.volnum', macEl), v => post('/mac/volume/' + v, 'Äänenvoimakkuuden säätö'));
     $('.mute', macEl).addEventListener('click', () => post('/mac/mute', 'Mykistys'));
+
+    // The volume and mute are locked until the lock is tapped, and lock again MAC_RELOCK_MS after the
+    // last touch, so brushing against them (or scrolling past) can't change the Mac's volume.
+    const MAC_RELOCK_MS = 5000;
+    let macRelock = null;
+    function setMacLocked(locked) {
+      clearTimeout(macRelock);
+      macEl.classList.toggle('locked', locked);
+      $('.lock', macEl).textContent = locked ? '🔒' : '🔓';
+      $('.lock', macEl).ariaLabel = locked ? 'Avaa Macin äänenvoimakkuuden säätö' : 'Lukitse Macin äänenvoimakkuuden säätö';
+      if (!locked) macRelock = setTimeout(() => setMacLocked(true), MAC_RELOCK_MS);
+    }
+    $('.lock', macEl).addEventListener('click', () => setMacLocked(!macEl.classList.contains('locked')));
+    // Any use of the slider or mute keeps it open a little longer.
+    ['pointerdown', 'input', 'change', 'click'].forEach(ev => macEl.addEventListener(ev, e => {
+      if (!macEl.classList.contains('locked') && !e.target.closest('.lock')) setMacLocked(false);
+    }));
 
     function renderMac(m) {
       // volume null: the output device has no software volume (e.g. an audio interface).

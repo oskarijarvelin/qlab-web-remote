@@ -640,9 +640,25 @@ async function refreshSpotify() {
         name: name.join('|'),
       };
     }
-  } catch {
-    status.spotify = { running: false };
+  } catch (err) {
+    // -1743: macOS hasn't allowed this program to control Spotify (System Settings → Privacy &
+    // Security → Automation). Typical when running as a background service.
+    const denied = /-1743|not authori[sz]ed/i.test(err.message);
+    status.spotify = { running: false, error: denied ? 'noPermission' : 'failed' };
+    logOnce('spotify', denied
+      ? 'Spotify: macOS ei salli ohjausta (Järjestelmäasetukset → Tietosuoja ja suojaus → Automaatio)'
+      : `Spotify: ${err.message.trim().split('\n').pop()}`);
+    return;
   }
+  logOnce('spotify', null);
+}
+
+// Logs a problem once rather than every second, and again only after it has cleared (msg null).
+const loggedProblems = new Map();
+function logOnce(key, msg) {
+  if (msg && loggedProblems.get(key) !== msg) log(msg);
+  if (msg) loggedProblems.set(key, msg);
+  else loggedProblems.delete(key);
 }
 
 // Fades Spotify to silence, pauses it and restores the original volume for the next play.
@@ -696,8 +712,10 @@ async function refreshMac() {
   try {
     const [volume, muted] = (await osascript(MAC_STATUS_SCRIPT)).split('|');
     status.mac = { volume: /^\d+$/.test(volume) ? Number(volume) : null, muted: muted === 'true' };
-  } catch {
+    logOnce('mac', null);
+  } catch (err) {
     status.mac = null;
+    logOnce('mac', `Macin äänenvoimakkuus: ${err.message.trim().split('\n').pop()}`);
   }
 }
 
